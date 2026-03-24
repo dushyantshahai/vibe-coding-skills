@@ -8,7 +8,7 @@
 
 [![Skills](https://img.shields.io/badge/Skills-26%20Documents-6366f1?style=for-the-badge&logo=bookstack&logoColor=white)](.)
 [![Compatible](https://img.shields.io/badge/Works%20With-Claude%20%7C%20Cursor%20%7C%20Codex-0ea5e9?style=for-the-badge&logo=anthropic&logoColor=white)](.)
-[![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](./LICENSE)
+[![License](https://img.shields.io/badge/Licenshe-MIT-22c55e?style=for-the-badge)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-f59e0b?style=for-the-badge)](.)
 
 <br/>
@@ -278,6 +278,6 @@ The meta-prompt framework these documents are built on was synthesised from thre
 
 **If this saved you time, a ⭐ helps others find it.**
 
-[Star this repo](https://github.com/dushyantshahai/dushyantshah-product-portfolio) · [Follow for updates](https://github.com/dushyantshahai) · [Share on X](#)
+[Star this repo](https://github.com/dushyantshahai/dushyantshah-product-portfolio) · [Follow for updates](https://github.com/dushyantshahai) · [Share on X](https://twitter.com/intent/tweet?text=Just%20discovered%20this%20free%20library%20of%2026%20skill%20documents%20for%20building%20production-grade%20AI%20products%20%E2%80%94%20no%20CS%20degree%20needed.%20Feed%20any%20skill%20to%20Claude%20Code%2C%20Cursor%2C%20or%20Codex.&url=https%3A%2F%2Fgithub.com%2Fdushyantshahai%2Fvibe-coding-skills)
 
 </div>
