@@ -1,3 +1,7 @@
+---
+name: environment-variables-secrets
+description: Manages API keys and secrets safely across dev, preview, and production environments. Use when setting up a new project, adding a new service, rotating a compromised key, or fixing missing env var errors in production.
+---
 # Skill: Environment Variables & Secrets Management
 
 ```json
@@ -448,6 +452,24 @@ The exposure window matters. If the repo was public, assume the key was harveste
 **Auditability:** If a secret leaks, you need to know which environment was compromised. Separate keys give you that information.
 
 **Most services make this easy:** Stripe has explicit test/live modes. OpenAI lets you create multiple keys with spending limits. Supabase gives you free projects perfect for staging.
+
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+After setting up your environment variable architecture, add this to your `AGENT_CONTEXT.md`:
+
+```md
+## Environment Variables
+- Template: .env.example — source of truth for all required vars
+- Validation: Zod schema in lib/env.ts — validates on startup, fails fast
+- Categories: NEXT_PUBLIC_ (client-safe) | server-only | build-time | infrastructure
+- Secret scanning: TruffleHog in CI — .github/workflows/ci.yml
+- Team sync: [Doppler | Vercel CLI `vercel env pull` | manual .env.example]
+- Rotation schedule: API keys rotated every [90 days | on team member departure]
+```
+
+**Why this matters:** Your coding agent needs to know the exact variable names to use in new features. Without this, it may guess variable names that don't match your actual .env.example, causing runtime errors that only surface in staging.
 
 </vibe_coder_bridge>
 

@@ -1,3 +1,7 @@
+---
+name: model-selection-evaluation
+description: Chooses the right AI model for each task and evaluates quality with a structured test protocol. Use when AI costs are too high, when quality is inconsistent, when comparing OpenAI vs Anthropic, or before upgrading to a new model version.
+---
 # Skill: Model Selection & Evaluation
 
 ```json
@@ -371,6 +375,23 @@ The models are close in capability for most tasks. Switch when you have a specif
 
 **Never switch models without running your evaluation test set on both.** Anecdotes and benchmarks are not your app's performance — your test set is.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+After completing model selection, capture these decisions:
+
+```md
+## Model Configuration
+- Primary model: [pinned model ID e.g. gpt-4o-2024-08-06]
+- Fast/cheap model: [pinned model ID e.g. gpt-4o-mini-2024-07-18]
+- Fallback provider: [anthropic | openai]
+- Model config location: `lib/ai/models.ts`
+- Eval protocol: [link to your eval spreadsheet or test file]
+- Latency SLO: p95 < [X]ms for [feature name]
+- Next deprecation review: [date — set 90 days out]
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -434,7 +455,42 @@ Monthly cost estimate at [X] daily calls: $[X] vs $[X]
 
 ## Reusable Model Configuration Patterns
 
-### Pattern 1: Centralised Model Configuration
+### Pattern 1: Latency SLOs — Defining Acceptable Performance
+
+Before selecting a model, define your latency target. Different features have different tolerances:
+
+| Feature | p50 target | p95 target | Model recommendation |
+|---|---|---|---|
+| Real-time chat | < 300ms TTFT | < 800ms TTFT | gpt-4o-mini, Claude Haiku |
+| Document analysis | < 2s | < 5s | gpt-4o, Claude Sonnet |
+| Background job | < 30s | < 60s | Any model |
+| Code generation | < 1s TTFT | < 3s TTFT | gpt-4o, Claude Sonnet |
+
+TTFT = Time to First Token (what users perceive as "response speed")
+
+```typescript
+// lib/ai/latency-tracker.ts
+export async function measureLatency(
+  modelCall: () => Promise<unknown>
+): Promise<{ result: unknown; ttftMs: number; totalMs: number }> {
+  const start = Date.now()
+  let ttftMs = 0
+
+  // For streaming, capture time to first chunk
+  const result = await modelCall()
+  const totalMs = Date.now() - start
+
+  if (totalMs > 5000) {
+    console.warn(`[latency:slow] ${totalMs}ms — consider switching to a faster model`)
+  }
+
+  return { result, ttftMs, totalMs }
+}
+```
+
+Log p50/p95 latency weekly using your `ai_generations` table: `SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FROM ai_generations WHERE feature = 'chat'`
+
+### Pattern 2: Centralised Model Configuration
 ```typescript
 // /lib/ai-config.ts
 // Single place to manage all model choices — easy to update and review
@@ -488,6 +544,62 @@ export function selectModel(
 }
 ```
 
+### Pattern 3: Fallback Routing — Graceful Degradation During Outages
+
+AI API providers have outages. Without fallback routing, your product goes down with them.
+
+```typescript
+// lib/ai/router.ts
+import OpenAI from "openai"
+import Anthropic from "@anthropic-ai/sdk"
+
+const openai = new OpenAI()
+const anthropic = new Anthropic()
+
+type RouteConfig = {
+  primary: "openai" | "anthropic"
+  fallback: "openai" | "anthropic"
+  primaryModel: string
+  fallbackModel: string
+}
+
+export async function routedCompletion(
+  prompt: string,
+  config: RouteConfig
+): Promise<string> {
+  try {
+    if (config.primary === "openai") {
+      const res = await openai.chat.completions.create({
+        model: config.primaryModel,
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 1000,
+      })
+      return res.choices[0].message.content ?? ""
+    }
+    // anthropic primary path...
+  } catch (primaryErr) {
+    console.error(`[model:fallback] Primary ${config.primaryModel} failed, trying ${config.fallbackModel}`)
+
+    try {
+      if (config.fallback === "anthropic") {
+        const res = await anthropic.messages.create({
+          model: config.fallbackModel,
+          max_tokens: 1000,
+          messages: [{ role: "user", content: prompt }],
+        })
+        return res.content[0].type === "text" ? res.content[0].text : ""
+      }
+      // openai fallback path...
+    } catch (fallbackErr) {
+      throw new Error("All AI providers unavailable. Please try again shortly.")
+    }
+  }
+  return ""
+}
+```
+
+Monitor fallback trigger rate in your observability dashboard — a spike means your primary provider is having issues.
+
 </common_patterns>
 
 ---
@@ -524,6 +636,37 @@ Never switch a production model without running your evaluation test set first. 
 ---
 
 <mistakes_to_avoid>
+
+### ❌ Using unpinned model identifiers in production
+
+`gpt-4o` silently changed behaviour multiple times across 2024–2025. Using a floating identifier means your evals pass today but the model behaves differently next month.
+
+✅ Always pin to dated snapshots in production:
+
+```typescript
+// lib/ai/models.ts — single source of truth for model config
+export const MODELS = {
+  // ✅ Pinned — predictable behaviour, survives model updates
+  primary: "gpt-4o-2024-08-06",
+  fast: "gpt-4o-mini-2024-07-18",
+  reasoning: "claude-opus-4-6",  // Anthropic models are versioned by release
+
+  // ❌ Never use these in production
+  // primary: "gpt-4o",   // silently updated
+  // fast: "gpt-4o-mini", // silently updated
+} as const
+
+export type ModelKey = keyof typeof MODELS
+```
+
+**Upgrade process:**
+1. A new model version releases (monitor OpenAI/Anthropic changelog)
+2. Update `MODELS.primary` in a branch
+3. Re-run your full 20-question eval suite against the new model
+4. Compare scores — only merge if scores are equal or better
+5. Deploy; monitor for 48 hours before removing old version
+
+Set a calendar reminder every 90 days to review model deprecation notices. OpenAI provides minimum 30-day notice but typically 90+ days.
 
 ### ❌ Using the Same Model for Every Feature
 If every feature uses GPT-4o, you are spending 10–20x more than necessary on features that would work equally well on GPT-4o-mini.  

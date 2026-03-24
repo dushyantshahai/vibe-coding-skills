@@ -39,6 +39,8 @@ Most vibe coders hit the same walls:
 
 Each one is a structured reference document that you feed to your AI coding agent. It contains the mental models, architecture patterns, step-by-step build instructions, production-ready code snippets, security guardrails, and debugging loops for one specific domain of software development.
 
+Every skill ends with a **🗂️ Update Your AGENT_CONTEXT.md** callout — a template of the exact decisions you made while implementing that skill. As you work through skills, you populate a single `AGENT_CONTEXT.md` file at the root of your project. Every future coding session starts by feeding this file to your agent. This is how you eliminate the "starts from zero" problem permanently: each session inherits the full architectural memory of every session before it.
+
 The documents were built for **AI product builders** — people creating EdTech platforms, conversational AI apps, productivity tools, and AI-powered SaaS — using natural language in their IDE rather than writing code from scratch.
 
 ---
@@ -132,12 +134,12 @@ vibe-coding-skills/
 
 | Skill | What It Solves | Use When |
 |---|---|---|
-| [**Backend Architecture**](./backend/skill-backend-architecture.md) | System design, stack decisions, folder structure, AI orchestration layer | Starting a new project or restructuring a messy one |
+| [**Backend Architecture**](./backend/skill-backend-architecture.md) | System design, stack decisions, folder structure, background job architecture (Inngest), database connection pooling for serverless, event-driven patterns, service-to-service auth | Starting a new project or restructuring a messy one |
 | [**API Routes**](./backend/skill-api-routes.md) | Building REST endpoints with validation, error handling, and consistent response shapes | Adding any server-side feature |
 | [**Agentic Workflows**](./backend/skill-agentic-workflows.md) | Multi-step AI pipelines with state management, retries, and graceful failure | Building features that require more than one AI call |
-| [**Database & Storage**](./backend/skill-database-storage.md) | Schema design, SQL/NoSQL/Vector DB selection, Prisma, Row Level Security | Designing any data model |
-| [**Auth & Authorization**](./backend/skill-authentication-authorization.md) | Login flows, session management, RBAC, Clerk/Supabase Auth setup | Adding users or protecting any route |
-| [**API Design & Integration**](./backend/skill-api-design-integration.md) | Consuming third-party APIs, webhook handlers, idempotency, integration wrappers | Connecting to Stripe, OpenAI, Resend, or any external service |
+| [**Database & Storage**](./backend/skill-database-storage.md) | Schema design, Prisma, Row Level Security, indexing strategy, N+1 prevention, zero-downtime migrations, connection pool sizing for serverless | Designing any data model |
+| [**Auth & Authorization**](./backend/skill-authentication-authorization.md) | Login flows, session management, RBAC, Clerk/Supabase Auth, API key management for B2B, auth audit logging | Adding users or protecting any route |
+| [**API Design & Integration**](./backend/skill-api-design-integration.md) | Consuming third-party APIs, webhook handlers, idempotency, exponential backoff, circuit breaker pattern, cursor pagination | Connecting to Stripe, OpenAI, Resend, or any external service |
 
 ---
 
@@ -169,9 +171,9 @@ vibe-coding-skills/
 
 | Skill | What It Solves | Use When |
 |---|---|---|
-| [**Deployment & Hosting**](./devops/skill-deployment-hosting.md) | Vercel/Railway deploy, preview environments, function timeouts for AI routes | First deploy or switching platforms |
+| [**Deployment & Hosting**](./devops/skill-deployment-hosting.md) | Vercel/Railway deploy, preview environments, function timeouts for AI routes, feature flags for gradual rollout, migration coordination | First deploy or switching platforms |
 | [**Environment Variables & Secrets**](./devops/skill-environment-variables-secrets.md) | Managing API keys across dev/preview/prod, secret rotation, startup validation | Setting up a new project or rotating a compromised key |
-| [**Monitoring & Observability**](./devops/skill-monitoring-observability.md) | Sentry, uptime monitoring, AI cost tracking, daily cost alerts | Before going live with real users |
+| [**Monitoring & Observability**](./devops/skill-monitoring-observability.md) | Sentry, uptime monitoring, AI cost tracking, SLO definitions, alert runbooks, distributed request correlation | Before going live with real users |
 
 ---
 
@@ -182,8 +184,8 @@ vibe-coding-skills/
 |---|---|---|
 | [**Single vs Multi-Agent**](./ai-specific/skill-single-vs-multi-agent.md) | The architecture decision: one agent or many? Decision tree + upgrade triggers | **Before designing any AI feature** — this is the entry point |
 | [**Prompt Engineering**](./ai-specific/skill-prompt-engineering.md) | Writing prompts that produce consistent, parseable outputs every time | When AI outputs are inconsistent or keep failing format checks |
-| [**AI Agent Design**](./ai-specific/skill-ai-agent-design.md) | Tool-calling agents, multi-agent orchestration, agent memory patterns | Building AI that takes actions, not just generates text |
-| [**RAG**](./ai-specific/skill-rag.md) | Retrieval Augmented Generation: chunking, embeddings, pgvector, semantic search | When AI needs to answer from your own content or remember past conversations |
+| [**AI Agent Design**](./ai-specific/skill-ai-agent-design.md) | Tool-calling agents, agent memory patterns, observability/tracing, tool call failure handling, per-run cost tracking | Building AI that takes actions, not just generates text |
+| [**RAG**](./ai-specific/skill-rag.md) | Retrieval Augmented Generation: chunking, embeddings, pgvector, semantic + hybrid search, re-ranking, RAG evaluation metrics, HyDE, stale embedding handling | When AI needs to answer from your own content or remember past conversations |
 | [**Model Selection**](./ai-specific/skill-model-selection-evaluation.md) | Choosing the right model for each task, evaluation protocol, A/B testing models | When costs are too high or quality is inconsistent |
 | [**AI Safety & Guardrails**](./ai-specific/skill-ai-safety-guardrails.md) | Rate limiting, prompt injection defence, output validation, content policy | Before exposing any AI feature to real users |
 
@@ -213,6 +215,7 @@ Every document follows the same 12-section format so your AI agent always knows 
 5. Step-by-Step      → Incremental build instructions with verify steps
 6. AI Agent Prompts  → Ready-to-paste prompts for each step
 7. Vibe Coder Bridge → Plain-English trade-off explanations
+                       └─ 🗂️ AGENT_CONTEXT.md callout (what to capture after this skill)
 8. Testing & QA      → How to verify this works + debugging loops
 9. Common Patterns   → Reusable code templates
 10. Security         → Non-negotiable guardrails for this domain
@@ -220,7 +223,7 @@ Every document follows the same 12-section format so your AI agent always knows 
 12. Real Examples    → Mini case studies from real AI products
 ```
 
-The **Context Anchor** section is the most important piece. Fill it in at the start of every session:
+The **Context Anchor** section grounds every session in your specific project. Fill it in at the start of every session:
 
 ```json
 {
@@ -233,13 +236,13 @@ The **Context Anchor** section is the most important piece. Fill it in at the st
 }
 ```
 
-Paste it into your AI agent before the skill content. It prevents the agent from hallucinating files that don't exist or suggesting tools you've already set up differently.
+The **AGENT_CONTEXT.md callout** (inside section 7) is what you capture *after* the session — the architectural decisions you made while implementing that skill. Over time, your `AGENT_CONTEXT.md` becomes the single file you paste into every new session to give your agent full memory of everything that's been built and decided. See `skill-product-documentation` for the full template.
 
 ---
 
 ## 📐 Design Principles
 
-These documents were built with five constraints that make them different from generic tutorials:
+These documents were built with six constraints that make them different from generic tutorials:
 
 **1. Incremental build rule** — Every execution section enforces: build one unit → test it → verify → proceed. No "generate the whole backend" prompts.
 
@@ -247,9 +250,11 @@ These documents were built with five constraints that make them different from g
 
 **3. Security non-negotiable** — Every document has a `<security_guardrails>` section that applies to that domain. Auth checks, input validation, secret management — always present.
 
-**4. AI-specific patterns** — The AI-Specific section covers problems that don't exist in standard dev tutorials: prompt injection, non-deterministic output validation, per-feature cost tracking, and the single-vs-multi-agent decision that most guides skip entirely.
+**4. AI-specific patterns** — The AI-Specific section covers problems that don't exist in standard dev tutorials: prompt injection, non-deterministic output validation, per-feature cost tracking, the single-vs-multi-agent decision, RAG re-ranking and evaluation, and agent observability.
 
 **5. Plain-English bridges** — Every technical decision has a `vibe_coder_bridge` section that explains it in plain English, with trade-offs stated clearly.
+
+**6. Persistent architectural memory** — Every skill ends with an explicit `🗂️ Update Your AGENT_CONTEXT.md` callout. As you implement skills, you capture decisions (which vector store, which auth provider, what indexing strategy) into a single file that gets fed to your agent at the start of every future session. This eliminates the "starts from zero" problem — your agent inherits the full memory of every previous architectural decision.
 
 ---
 
@@ -260,7 +265,8 @@ Found a pattern that should be in here? A security guardrail that's missing? A b
 1. Fork the repo
 2. Add or update the relevant skill document
 3. Follow the 12-section structure above
-4. Submit a PR with a one-line description of what you changed and why
+4. Include a `🗂️ Update Your AGENT_CONTEXT.md` callout at the end of the `<vibe_coder_bridge>` section — list the specific decisions a developer should capture after implementing this skill
+5. Submit a PR with a one-line description of what you changed and why
 
 Bug reports and experience reports (what worked, what didn't) are equally welcome as Issues.
 

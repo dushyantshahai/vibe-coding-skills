@@ -1,3 +1,7 @@
+---
+name: agentic-workflows
+description: Builds multi-step AI pipelines with state management, retries, and graceful failure. Use when a feature requires more than one AI call, when steps depend on each other's output, or when building background AI jobs.
+---
 # Skill: Agentic Workflows
 
 ```json
@@ -381,6 +385,20 @@ For user-facing features: if it takes more than 3 seconds, show a loading state.
 
 For background jobs (not user-facing): you have more time. Use Inngest or Trigger.dev which handle long-running jobs natively.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Agentic Workflows
+- Job runner: [Inngest | Trigger.dev] — job definitions in `lib/jobs/`
+- Inngest webhook: `app/api/inngest/route.ts`
+- DLQ: WorkflowRun table with status='dead' — `lib/workflows/dlq.ts`
+- Cancellation: supported via status='cancelled' check in each step
+- Retry strategy: [X] attempts, exponential backoff
+- Step checkpointing: using step.run() — restarts from failed step, not from scratch
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -555,6 +573,88 @@ export const tools = {
 };
 ```
 
+### Dead Letter Queue — What Happens When All Retries Fail
+
+When a workflow step exhausts all retries, you need a "where did this go?" answer. Without a DLQ, permanently failed workflows silently disappear.
+
+```typescript
+// In your workflow DB schema (add to Prisma):
+// model WorkflowRun {
+//   id         String   @id @default(cuid())
+//   userId     String
+//   type       String
+//   status     String   @default("pending")  // pending | running | completed | failed | dead
+//   input      Json
+//   result     Json?
+//   error      String?
+//   attempts   Int      @default(0)
+//   deadAt     DateTime?
+//   createdAt  DateTime @default(now())
+// }
+
+// lib/workflows/dlq.ts
+export async function moveToDeadLetterQueue(
+  workflowRunId: string,
+  finalError: string
+) {
+  await db.workflowRun.update({
+    where: { id: workflowRunId },
+    data: {
+      status: "dead",
+      error: finalError,
+      deadAt: new Date(),
+    },
+  })
+
+  // Alert on-call / send notification to user
+  await sendAdminAlert({
+    title: "Workflow permanently failed",
+    body: `WorkflowRun ${workflowRunId} exhausted all retries: ${finalError}`,
+    severity: "high",
+  })
+
+  // Optional: notify the user their task failed
+  const run = await db.workflowRun.findUnique({ where: { id: workflowRunId } })
+  if (run) {
+    await notifyUser(run.userId, "Your task could not be completed. Our team has been notified.")
+  }
+}
+
+// Query dead-letter queue for debugging:
+// SELECT * FROM workflow_runs WHERE status = 'dead' ORDER BY dead_at DESC LIMIT 20
+```
+
+### Workflow Cancellation — Let Users Cancel Long-Running Jobs
+
+```typescript
+// app/api/workflows/[id]/cancel/route.ts
+export async function POST(req: Request, { params }: { params: { id: string } }) {
+  const { userId } = await requireAuth()
+
+  const run = await db.workflowRun.findUniqueOrThrow({ where: { id: params.id } })
+  if (run.userId !== userId) return new Response("Forbidden", { status: 403 })
+  if (!["pending", "running"].includes(run.status)) {
+    return Response.json({ error: "Workflow already completed or cancelled" }, { status: 400 })
+  }
+
+  await db.workflowRun.update({
+    where: { id: params.id },
+    data: { status: "cancelled" }
+  })
+
+  return Response.json({ success: true })
+}
+
+// In each workflow step: check for cancellation before proceeding
+async function executeStep(workflowRunId: string, stepFn: () => Promise<void>) {
+  const run = await db.workflowRun.findUnique({ where: { id: workflowRunId } })
+  if (run?.status === "cancelled") {
+    throw new Error("CANCELLED")  // caught by the pipeline runner, stops execution cleanly
+  }
+  await stepFn()
+}
+```
+
 </common_patterns>
 
 ---
@@ -631,8 +731,35 @@ Your agent sends an email, deletes a record, or charges a payment card as part o
 **Fix:** Separate read tools (always safe) from write tools (require confirmation). Never run write tools in development without a `isDryRun` flag.
 
 ### ❌ Using Agent-Style Workflows for Simple Tasks
-You use a full LangChain agent for something that is just "format this text into JSON". Agents are slow, expensive, and unpredictable.  
+You use a full LangChain agent for something that is just "format this text into JSON". Agents are slow, expensive, and unpredictable.
 **Fix:** Use an agent only when the AI genuinely needs to make decisions about which tools to call. For everything else, use a simple sequential workflow.
+
+### ❌ Changing a workflow's step signatures with in-flight runs
+
+If you rename a step, remove a step, or change step input shapes while workflows are running, in-flight runs will fail when they try to execute the modified step.
+
+**Fix:** Use workflow version numbers:
+
+```typescript
+// When breaking changes are needed:
+// 1. Create a new workflow function: documentIngestV2
+// 2. Keep the old one running for in-flight jobs: documentIngestV1
+// 3. Route new triggers to V2, let V1 drain
+// 4. Remove V1 after all V1 runs show status = 'completed' or 'dead'
+
+// In Inngest: use function IDs to version
+export const documentIngestV1 = inngest.createFunction(
+  { id: "document-ingest-v1" },  // never change this ID
+  { event: "document/uploaded.v1" },
+  async ({ event }) => { /* old logic */ }
+)
+
+export const documentIngestV2 = inngest.createFunction(
+  { id: "document-ingest-v2" },
+  { event: "document/uploaded" },  // new triggers go here
+  async ({ event }) => { /* new logic */ }
+)
+```
 
 </mistakes_to_avoid>
 

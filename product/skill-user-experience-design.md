@@ -1,3 +1,7 @@
+---
+name: user-experience-design
+description: Maps user flows, removes friction, writes UI copy, and adds accessibility. Use before building any new screen, when users drop off mid-feature, when empty states are missing, or when the app feels confusing to first-time users.
+---
 # Skill: User Experience Design
 
 ```json
@@ -425,6 +429,21 @@ The rule of thumb: only collect what you will immediately use to personalise the
 
 Fewer onboarding questions = more users completing onboarding = more users reaching first value.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## UX Design Patterns
+- Three-question test: "where am I / what can I do / what happens next" — run on every new screen
+- FTUX: FirstRunEmptyState component — pre-filled example, target < 5 min to first generation
+- Empty/loading/populated states: all three implemented for every AI feature
+- Destructive actions: ConfirmDialog component with explicit consequence + specific verb
+- AI confidence: ConfidenceIndicator component — shown for medium/low RAG scores
+- Accessibility: aria-live on streaming output; all interactive elements > 44px touch target
+- Friction audit: count steps to core value — target < 3 steps
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -583,35 +602,118 @@ export function AIGenerationStatus({
 }
 ```
 
-### Pattern 3: Destructive Action Confirmation
-```typescript
-// Only use for truly irreversible, high-consequence actions
-export function DeleteConfirmationDialog({
-  itemName,
-  onConfirm,
-  onCancel,
-}: {
-  itemName: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <Dialog open onOpenChange={onCancel}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Delete reminder?</DialogTitle>
-          <DialogDescription>
-            "{itemName}" will be permanently deleted. This cannot be undone.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button variant="destructive" onClick={onConfirm}>Delete</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+### Pattern 3: Destructive Action Confirmation Pattern
+
+Deleting a document, clearing conversation history, or cancelling a subscription are irreversible. The UX must make the consequence explicit and create a deliberate pause.
+
+```tsx
+// components/features/confirm-dialog.tsx
+interface ConfirmDialogProps {
+  isOpen: boolean
+  onClose: () => void
+  onConfirm: () => void
+  title: string
+  description: string        // explicit consequence: "This will permanently delete 47 messages"
+  confirmLabel?: string      // specific action label, not "OK"
+  isDangerous?: boolean      // red confirm button for irreversible actions
+  isLoading?: boolean
 }
+
+export function ConfirmDialog({
+  isOpen, onClose, onConfirm, title, description,
+  confirmLabel = "Confirm",
+  isDangerous = false,
+  isLoading = false,
+}: ConfirmDialogProps) {
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} aria-labelledby="confirm-title">
+      <div className="p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          {isDangerous && (
+            <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+              <span className="text-red-600 text-lg" aria-hidden="true">⚠</span>
+            </div>
+          )}
+          <div>
+            <h2 id="confirm-title" className="text-lg font-semibold">{title}</h2>
+            <p className="text-sm text-gray-500 mt-1">{description}</p>
+          </div>
+        </div>
+
+        <div className="flex gap-3 justify-end">
+          <Button variant="secondary" onClick={onClose} disabled={isLoading}>
+            Cancel
+          </Button>
+          <Button
+            variant={isDangerous ? "destructive" : "primary"}
+            onClick={onConfirm}
+            loading={isLoading}
+          >
+            {confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// Usage:
+// <ConfirmDialog
+//   isOpen={showDeleteConfirm}
+//   title="Delete this document?"
+//   description="This will permanently delete 47 messages and all embeddings. This cannot be undone."
+//   confirmLabel="Delete forever"  // specific, not "OK"
+//   isDangerous={true}
+//   onConfirm={handleDelete}
+// />
+```
+
+**Rules for destructive confirmations:**
+1. Describe the exact consequence ("This will delete 47 messages" not "Are you sure?")
+2. Use a specific action verb ("Delete forever" not "OK" or "Confirm")
+3. Make Cancel the visually prominent option (or at minimum equal prominence)
+4. For very high-stakes actions (account deletion), require the user to type their email
+
+### Pattern 4: AI Confidence Display — Building Trust Without Undermining Value
+
+When AI output quality is uncertain (e.g., low retrieval scores in RAG, a query outside the model's knowledge), showing a confidence indicator builds trust by setting accurate expectations.
+
+```tsx
+// components/features/ai/confidence-indicator.tsx
+type ConfidenceLevel = "high" | "medium" | "low"
+
+interface ConfidenceIndicatorProps {
+  level: ConfidenceLevel
+  showLabel?: boolean
+}
+
+export function ConfidenceIndicator({ level, showLabel = true }: ConfidenceIndicatorProps) {
+  const config = {
+    high:   { label: "High confidence",    color: "text-green-600",  description: "Based on clear matching information" },
+    medium: { label: "Medium confidence",  color: "text-yellow-600", description: "Based on partially matching information" },
+    low:    { label: "Low confidence",     color: "text-gray-500",   description: "Limited matching information found — verify independently" },
+  }[level]
+
+  return (
+    <div className={`flex items-center gap-1.5 text-xs ${config.color}`} title={config.description}>
+      <div className="flex gap-0.5">
+        <span className={`w-1.5 h-3 rounded-sm ${level !== "low" ? "opacity-100" : "opacity-20"} bg-current`} />
+        <span className={`w-1.5 h-3 rounded-sm ${level === "high" ? "opacity-100" : "opacity-20"} bg-current`} />
+      </div>
+      {showLabel && <span>{config.label}</span>}
+    </div>
+  )
+}
+
+// Derive confidence from RAG retrieval scores:
+function deriveConfidence(rerankScore: number): ConfidenceLevel {
+  if (rerankScore > 0.7) return "high"
+  if (rerankScore > 0.4) return "medium"
+  return "low"
+}
+
+// Show only for medium/low — don't clutter high-confidence responses:
+// {confidence !== "high" && <ConfidenceIndicator level={confidence} />}
 ```
 
 </common_patterns>
@@ -638,6 +740,66 @@ Any action that permanently removes data (delete, cancel subscription, revoke ac
 Forms should only submit when the user explicitly clicks a submit button. Never submit on blur, on a timer, or without clear user intent. This is both a UX and a trust issue.
 
 </security_guardrails>
+
+---
+
+### First-Time User Experience (FTUX) — The Most Important 5 Minutes
+
+The first 5 minutes determine whether a user activates or churns. For AI products, activation = the first AI generation that solves a real problem for the user. Design every FTUX screen to reach that moment in under 2 minutes.
+
+**FTUX Design Framework:**
+
+```
+Step 1: Remove Barriers to First Use
+  - Pre-fill example content so users don't face a blank slate
+  - Make the first AI generation require zero setup
+  - Defer account creation until after the user has seen value
+
+Step 2: Design for the Aha Moment
+  - Identify your product's "aha moment" (the generation that makes the user say "wow")
+  - Count the steps from signup to that moment — target < 3 steps
+  - Every FTUX screen should move the user closer to that moment
+
+Step 3: Contextualise, Don't Lecture
+  - Tooltips > modals for feature education (don't interrupt the flow)
+  - Show, don't tell — use example output to demonstrate value
+  - Let the user explore after they've had the aha moment
+```
+
+```tsx
+// components/features/onboarding/empty-state-with-cta.tsx
+// For users who just signed up and haven't generated anything yet
+export function FirstRunEmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[400px] gap-6 p-8 text-center">
+      <div className="space-y-2">
+        <h2 className="text-2xl font-semibold">Welcome! Let's make something great.</h2>
+        <p className="text-gray-500 max-w-md">
+          You're 30 seconds away from your first AI generation.
+          We've pre-loaded an example to get you started.
+        </p>
+      </div>
+
+      {/* Pre-filled example — remove the blank slate */}
+      <div className="w-full max-w-lg bg-gray-50 dark:bg-gray-800 rounded-lg p-4 text-left">
+        <p className="text-sm text-gray-500 mb-2">Example prompt (edit or use as-is):</p>
+        <ExamplePromptWithAutoFill
+          example="Write a product description for a noise-cancelling headphone that appeals to remote workers"
+        />
+      </div>
+
+      <Button size="lg" onClick={handleGenerate}>
+        Generate my first result →
+      </Button>
+    </div>
+  )
+}
+```
+
+**FTUX metrics to track (in your analytics):**
+- Time from signup to first generation (target: < 5 minutes)
+- % of new users who complete first generation within 24 hours (target: > 40%)
+- Drop-off point in onboarding funnel (where do users leave before first generation?)
 
 ---
 

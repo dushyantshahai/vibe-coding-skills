@@ -1,3 +1,7 @@
+---
+name: responsive-design
+description: Builds mobile-first layouts using Tailwind CSS that work on every screen size. Use when a layout breaks on mobile, when building app shells with sidebars, or when fixing iOS keyboard and safe area issues.
+---
 # Skill: Responsive Design
 
 ```json
@@ -402,6 +406,22 @@ Three most common causes:
 
 3. **Missing `overflow-x-hidden`:** One element slightly overflows the viewport, creating a horizontal scroll on the entire page. Fix: add `overflow-x-hidden` to the root layout.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Responsive Design
+- Approach: mobile-first — base styles for mobile, sm:/md:/lg: for larger screens
+- Dark mode: Tailwind class strategy — theme store in lib/store/theme-store.ts
+- Mobile viewport: 100dvh (not 100vh) for mobile browser chrome
+- iOS safe areas: tailwindcss-safe-area plugin — pb-safe on bottom elements
+- Touch targets: minimum 44px height/width on all interactive elements
+- Reduced motion: motion-safe: prefix on all animations + @media override in globals.css
+- Sidebar: lg:relative lg:translate-x-0 — overlay on mobile, inline on desktop
+- Breakpoints: sm=640, md=768, lg=1024, xl=1280 (Tailwind defaults)
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -471,6 +491,118 @@ Mobile layout issue →
 <common_patterns>
 
 ## Reusable Responsive Patterns
+
+### Accessibility: Respect prefers-reduced-motion
+
+AI streaming interfaces with smooth typewriter animations and sliding sidebars can trigger vestibular disorders in users who have requested reduced motion in their OS settings. This affects ~35% of users with motion sensitivity conditions.
+
+```typescript
+// tailwind.config.ts — Tailwind's motion-safe/motion-reduce variants handle this automatically
+// Use motion-safe: prefix so animations only run when user hasn't requested reduced motion
+
+// ✅ Correct — animation is skipped for users with prefers-reduced-motion: reduce
+<span className="motion-safe:animate-pulse" />
+<div className="motion-safe:transition-transform motion-safe:duration-300 translate-x-0" />
+
+// ❌ Wrong — always animates, ignores user preference
+<span className="animate-pulse" />
+```
+
+```css
+/* globals.css — global reduced motion override as a safety net */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+```
+
+```typescript
+// hooks/use-reduced-motion.ts — check in JS when you need conditional logic
+export function usePrefersReducedMotion(): boolean {
+  if (typeof window === "undefined") return false
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+}
+
+// Usage:
+// const reducedMotion = usePrefersReducedMotion()
+// In your streaming UI: if (reducedMotion) show full text immediately instead of typewriter effect
+```
+
+### Dark Mode with Tailwind + System Preference
+
+Dark mode is a top feature request for AI products (people use them at night). Implement it with Tailwind's `class` strategy to support both system preference and manual toggle.
+
+```typescript
+// tailwind.config.ts
+export default {
+  darkMode: "class",  // uses class strategy — add "dark" to <html> element
+  // ...
+}
+```
+
+```typescript
+// lib/store/theme-store.ts
+import { create } from "zustand"
+import { persist } from "zustand/middleware"
+
+type Theme = "light" | "dark" | "system"
+
+interface ThemeStore {
+  theme: Theme
+  setTheme: (theme: Theme) => void
+}
+
+export const useThemeStore = create<ThemeStore>()(
+  persist(
+    (set) => ({
+      theme: "system",
+      setTheme: (theme) => {
+        set({ theme })
+        applyTheme(theme)
+      },
+    }),
+    { name: "theme" }
+  )
+)
+
+function applyTheme(theme: Theme) {
+  const root = document.documentElement
+  if (theme === "dark") {
+    root.classList.add("dark")
+  } else if (theme === "light") {
+    root.classList.remove("dark")
+  } else {
+    // System: respect OS preference
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches
+    root.classList.toggle("dark", prefersDark)
+  }
+}
+```
+
+```tsx
+// app/layout.tsx — initialise theme on load to prevent flash of wrong theme
+<script dangerouslySetInnerHTML={{
+  __html: `
+    (function() {
+      const theme = localStorage.getItem('theme')?.replace(/"/g, '') ?? 'system';
+      if (theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark');
+      }
+    })()
+  `
+}} />
+```
+
+Use Tailwind's `dark:` prefix on every colour:
+```tsx
+<div className="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+```
 
 ### Pattern 1: Responsive Sidebar App Shell
 ```typescript

@@ -1,3 +1,7 @@
+---
+name: api-routes
+description: Builds reliable REST API endpoints with validation, auth checks, and consistent error handling. Use when adding any server-side route, building CRUD operations, or fixing inconsistent API responses.
+---
 # Skill: API Routes Design & Building
 
 ```json
@@ -371,6 +375,21 @@ If you are using Next.js:
 
 When in doubt, use App Router. It is the current standard and handles streaming (needed for AI responses) much better.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## API Routes
+- Response envelope: { success: boolean, data?, error?, message? } — consistent across all routes
+- Validation: Zod schemas in `lib/schemas/` — used in both routes and forms
+- Rate limiting: Upstash Redis — chat: 10/min, api: 100/min, upload: 5/min
+- Auth pattern: `requireAuth()` from `lib/auth/` at top of every handler
+- Ownership check: resource.userId === session.userId before returning data
+- Body size limits: 50kb for AI routes, 10mb for upload routes
+- Caching: private, max-age=60 for user data; public for shared data; no-store for AI
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -540,6 +559,127 @@ export async function PATCH(
     return NextResponse.json({ success: false, error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }
+```
+
+### Request Size Limits
+
+Next.js has a 4MB default body size limit for API routes, but AI products often need different limits per route:
+
+```typescript
+// app/api/documents/upload/route.ts — allow larger uploads
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "10mb",  // increase for document upload routes
+    },
+  },
+}
+
+// app/api/chat/route.ts — keep tight limit on AI routes
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "50kb",  // chat messages should be small — reject prompt injection payloads
+    },
+  },
+}
+```
+
+For streaming routes (edge runtime), validate content-length header before processing:
+
+```typescript
+export async function POST(req: Request) {
+  const contentLength = req.headers.get("content-length")
+  if (contentLength && parseInt(contentLength) > 50_000) {
+    return Response.json({ error: "Request too large" }, { status: 413 })
+  }
+  // ... rest of handler
+}
+```
+
+### Route-Level Rate Limiting
+
+Apply different rate limits per route type — expensive AI routes need tighter limits than read routes:
+
+```typescript
+// lib/rate-limit.ts
+import { Ratelimit } from "@upstash/ratelimit"
+import { Redis } from "@upstash/redis"
+
+const redis = Redis.fromEnv()
+
+// Different limiters for different route types
+export const chatRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(10, "1 m"),  // 10 AI requests per minute
+  prefix: "rl:chat",
+})
+
+export const apiRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(100, "1 m"),  // 100 general API requests per minute
+  prefix: "rl:api",
+})
+
+export const uploadRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(5, "1 m"),  // 5 uploads per minute
+  prefix: "rl:upload",
+})
+
+// Usage in route:
+export async function POST(req: Request) {
+  const { userId } = await requireAuth()
+
+  const { success, remaining } = await chatRateLimit.limit(userId)
+  if (!success) {
+    return Response.json(
+      { success: false, error: "Too many requests. Please wait a moment." },
+      { status: 429, headers: { "X-RateLimit-Remaining": remaining.toString() } }
+    )
+  }
+  // ... rest of handler
+}
+```
+
+### Caching Headers for Read Routes
+
+Reduce database load on frequently-read, slowly-changing data with HTTP caching:
+
+```typescript
+// app/api/user/profile/route.ts — cache for 60 seconds, stale-while-revalidate for 5 minutes
+export async function GET(req: Request) {
+  const { userId } = await requireAuth()
+  const profile = await db.user.findUnique({ where: { id: userId } })
+
+  return Response.json(
+    { success: true, data: profile },
+    {
+      headers: {
+        "Cache-Control": "private, max-age=60, stale-while-revalidate=300",
+        // private: only cached in the client, not in CDN (user-specific data)
+      }
+    }
+  )
+}
+
+// app/api/public/plans/route.ts — cache pricing plans publicly for 1 hour
+export async function GET() {
+  const plans = await db.plan.findMany({ where: { active: true } })
+
+  return Response.json(
+    { success: true, data: plans },
+    {
+      headers: {
+        "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+        // public: can be cached in CDN (Vercel Edge)
+      }
+    }
+  )
+}
+
+// For AI generation routes: always no-cache
+// "Cache-Control": "no-store"
 ```
 
 </common_patterns>

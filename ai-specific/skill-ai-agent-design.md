@@ -1,3 +1,7 @@
+---
+name: ai-agent-design
+description: Builds tool-calling AI agents that query databases, call APIs, and take actions. Use when building a conversational AI feature that needs to read or write data, when designing multi-agent orchestrators, or when adding agent memory.
+---
 # Skill: AI Agent Design
 
 ```json
@@ -174,6 +178,43 @@ Every tool needs three things the AI uses to decide whether and how to call it:
   },
 }
 ```
+
+## Agent Memory: Three Levels
+
+| Memory Type | Storage | Use Case | Implementation |
+|---|---|---|---|
+| In-session | JS array in route handler | Single conversation | `const messages = []` passed to streamText |
+| Cross-session | Database (messages table) | Persistent chat history | Load last N messages from DB on each request |
+| Long-term semantic | pgvector / Pinecone | "Remember what the user told me weeks ago" | Embed + store facts, retrieve by similarity |
+
+### Sliding Window Context Trimming
+
+When conversation history exceeds the model's context window, trim oldest messages:
+
+```typescript
+// lib/ai/memory.ts
+const MAX_CONTEXT_TOKENS = 8000 // leave room for system prompt + response
+
+export function trimConversationHistory(
+  messages: Message[],
+  maxTokens = MAX_CONTEXT_TOKENS
+): Message[] {
+  // rough estimate: 1 token ≈ 4 chars
+  let totalChars = 0
+  const trimmed: Message[] = []
+
+  for (const msg of [...messages].reverse()) {
+    const chars = JSON.stringify(msg).length
+    if (totalChars + chars > maxTokens * 4) break
+    trimmed.unshift(msg)
+    totalChars += chars
+  }
+
+  return trimmed
+}
+```
+
+Always keep the FIRST message (system context) and trim from the middle, not the start.
 
 </system_design_breakdown>
 
@@ -456,9 +497,28 @@ Separate them — and be much more careful with write tools. A good pattern:
 
 For write tools that are hard to undo (delete, send email), consider asking the AI to confirm with the user before executing:
 ```
-In your system prompt: "Before creating, deleting, or sending anything, 
+In your system prompt: "Before creating, deleting, or sending anything,
 summarise what you are about to do and ask the user to confirm."
 ```
+
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+After wiring up your agent, add this block to your `AGENT_CONTEXT.md` so future coding sessions don't re-debate architecture:
+
+```md
+## AI Agent
+- Agent framework: Vercel AI SDK `streamText` with tools
+- Tool definitions: `lib/ai/tools/` — one file per tool
+- Memory strategy: [in-session array | DB messages table | pgvector long-term]
+- Max steps: [your value] — set in streamText({ maxSteps: N })
+- Cost tracking: ai_generations table, logged on stream completion
+- Tracing: [Helicone proxy | LangSmith | console.log wrapper in lib/ai/trace.ts]
+- User scoping: all tool calls receive userId from verified session (never from client)
+```
+
+**Why this matters:** Without this, your next coding session may suggest a different agent framework or forget the maxSteps limit you set — causing runaway loops in production.
 
 </vibe_coder_bridge>
 
@@ -659,6 +719,55 @@ export async function POST(req: Request) {
 // useChat automatically manages conversation history across turns
 ```
 
+### Pattern 4: Agent Tracing Wrapper — Structured Logging for Every Tool Call
+```typescript
+// lib/ai/trace.ts — wrap every tool call with structured logging
+import { Sentry } from "@sentry/nextjs"
+
+interface ToolTrace {
+  toolName: string
+  input: unknown
+  output: unknown
+  durationMs: number
+  error?: string
+  userId: string
+  stepIndex: number
+}
+
+export function createTracedTools<T extends Record<string, Function>>(
+  tools: T,
+  context: { userId: string }
+): T {
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, fn]) => [
+      name,
+      async (...args: unknown[]) => {
+        const start = Date.now()
+        const stepIndex = Math.random() // replace with actual step counter
+        try {
+          const output = await fn(...args)
+          const trace: ToolTrace = {
+            toolName: name,
+            input: args[0],
+            output,
+            durationMs: Date.now() - start,
+            userId: context.userId,
+            stepIndex,
+          }
+          console.log("[agent:tool]", JSON.stringify(trace))
+          return output
+        } catch (err) {
+          Sentry.captureException(err, { extra: { toolName: name, userId: context.userId } })
+          throw err
+        }
+      },
+    ])
+  ) as T
+}
+```
+
+For production-grade tracing, connect to **Helicone** (`HELICONE_API_KEY`) as a proxy in front of OpenAI, or use **LangSmith** for full agent run visualisation. Both require only a base URL change in your OpenAI client config.
+
 </common_patterns>
 
 ---
@@ -700,6 +809,31 @@ const result = await streamText({
 ### Rule 4: Sanitise Before Passing User Input to Tool Parameters
 When user text flows into a tool (e.g. "task" field from their message), it may contain injection attempts. Validate and sanitise before writing to the database.
 
+### Rule 5: Cost Per Run Tracking
+
+Multi-step agents can consume 10–50x more tokens than a single completion. Track cost per agent run:
+
+```typescript
+// In your route handler, after streamText completes
+const result = await streamText({ ... })
+
+// Access usage after stream completes
+result.usage.then(usage => {
+  const costUsd =
+    (usage.promptTokens / 1_000_000) * 2.50 +   // gpt-4o input price
+    (usage.completionTokens / 1_000_000) * 10.00  // gpt-4o output price
+
+  console.log(`[agent:cost] userId=${userId} steps=${steps} cost=$${costUsd.toFixed(4)}`)
+
+  // Log to your ai_generations audit table
+  await db.aiGeneration.create({
+    data: { userId, promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, costUsd, feature: "agent" }
+  })
+})
+```
+
+Set a hard per-user daily budget in your rate limiter — reject requests once a user exceeds e.g. $1.00/day in agent costs.
+
 </security_guardrails>
 
 ---
@@ -723,8 +857,40 @@ The AI calls `listReminders` when the user says "how many reminders do I have?" 
 **Fix:** Every tool description should state explicitly what it does AND when NOT to call it if there is ambiguity with another tool.
 
 ### ❌ Tools That Can Both Read and Write
-A single `manageReminder` tool that can create, update, or delete depending on an `action` parameter. The AI misunderstands the action parameter and deletes instead of updates.  
+A single `manageReminder` tool that can create, update, or delete depending on an `action` parameter. The AI misunderstands the action parameter and deletes instead of updates.
 **Fix:** Separate read and write operations into distinct tools.
+
+### ❌ Not handling tool call failures
+
+When a tool throws, streamText surfaces it as a stream error — the client gets a broken response with no explanation.
+
+✅ Wrap each tool execution with graceful degradation:
+
+```typescript
+// In your tool definition, catch and return structured errors
+const tools = {
+  searchDatabase: tool({
+    description: "Search user's documents",
+    parameters: z.object({ query: z.string() }),
+    execute: async ({ query }) => {
+      try {
+        const results = await db.search(query)
+        return { success: true, results }
+      } catch (err) {
+        // Return error as data — don't throw
+        // The agent can then decide to retry or inform the user
+        return {
+          success: false,
+          error: "Database search failed. Try a different query.",
+          results: []
+        }
+      }
+    }
+  })
+}
+```
+
+The agent will see the error in the tool output and can respond gracefully: "I had trouble searching your documents. Can you rephrase your question?"
 
 </mistakes_to_avoid>
 

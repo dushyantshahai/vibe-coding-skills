@@ -1,3 +1,7 @@
+---
+name: monitoring-observability
+description: Sets up Sentry, uptime monitoring, AI cost tracking, and daily cost alerts. Use before any public launch, when AI bills are unexpectedly high, or when production bugs are discovered by users instead of by you.
+---
 # Skill: Monitoring & Observability
 
 ```json
@@ -159,6 +163,36 @@ This table gives you:
 - Cost breakdown by user (is one user abusing your system?)
 - Latency trends by model (is GPT-4o getting slower?)
 - Failure rates by feature (which AI feature is least reliable?)
+
+## SLO Definitions — What Does "Working Correctly" Mean?
+
+Before you can monitor, you need to define what success looks like in measurable terms. A Service Level Objective (SLO) is a target you commit to.
+
+**Recommended SLOs for AI products:**
+
+| Service | SLO | Alert Threshold |
+|---|---|---|
+| Web app availability | 99.5% uptime (< 3.6 hrs/month downtime) | Alert if < 99% in rolling 24h |
+| AI generation (p95 latency) | p95 < 10 seconds | Alert if p95 > 15 seconds over 5 min |
+| AI generation (error rate) | < 2% errors | Alert if > 5% errors in 5 min window |
+| API response (non-AI, p95) | p95 < 500ms | Alert if p95 > 1 second |
+| Background job success rate | > 95% | Alert if < 90% in rolling 1 hour |
+
+```sql
+-- Query p95 AI latency from your ai_generations table (run weekly):
+SELECT
+  DATE_TRUNC('day', created_at) as day,
+  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency_ms) as p50_ms,
+  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) as p95_ms,
+  COUNT(*) as request_count,
+  AVG(cost_usd) as avg_cost_usd
+FROM ai_generations
+WHERE created_at > NOW() - INTERVAL '7 days'
+GROUP BY 1
+ORDER BY 1;
+```
+
+Review your SLOs monthly. If you're consistently at 98% when your SLO is 99.5%, investigate before it becomes a customer problem.
 
 </system_design_breakdown>
 
@@ -440,6 +474,22 @@ Alert fatigue is real. If every alert is not immediately actionable, you will st
 - Slowest routes
 - Highest-cost features
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Observability
+- Error tracking: Sentry — DSN in SENTRY_DSN env var, PII scrubbing enabled
+- Uptime monitoring: Better Uptime — health endpoint at /api/health
+- AI cost tracking: ai_generations table + daily alert cron at /api/cron/cost-alert
+- Analytics: Vercel Analytics (web vitals) + PostHog (custom events)
+- Request correlation: X-Request-ID header in middleware — `lib/logger.ts`
+- SLOs: p95 AI generation < 10s, error rate < 2%, uptime > 99.5%
+- Runbooks: docs/runbooks/
+- Alert thresholds: DAILY_AI_BUDGET_USD=[X] env var
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -656,7 +706,79 @@ export async function GET(req: Request) {
 }
 ```
 
-### Pattern 4: Vercel Analytics Custom Events
+### Pattern 4: Alert Runbooks — Every Alert Needs a "Now What?"
+
+An alert without a runbook creates panic. Every alert should link to a short Markdown file that answers: "What does this alert mean? What should I check first? How do I fix it?"
+
+```markdown
+<!-- docs/runbooks/ai-cost-spike.md -->
+# Alert: Daily AI Cost Spike
+
+**Trigger:** Daily AI spend > $50 (or your threshold)
+
+## What this means
+AI generation costs exceeded the expected daily budget. This usually means:
+- A single user is running many requests (check ai_generations by userId)
+- A new feature is generating more tokens than expected
+- A runaway background job
+
+## Investigation Steps
+1. Check Supabase: `SELECT user_id, SUM(cost_usd) FROM ai_generations WHERE DATE(created_at) = CURRENT_DATE GROUP BY 1 ORDER BY 2 DESC LIMIT 10`
+2. Check for background jobs stuck in a loop (Inngest dashboard → Functions → check for high invocation counts)
+3. Check Sentry for any new errors that might be causing retries
+
+## Resolution
+- If one user: check if they're on free tier and should be rate-limited
+- If background job: cancel the job in Inngest dashboard, fix the bug, redeploy
+- Immediate relief: lower the DAILY_AI_BUDGET_USD env var to trigger earlier alerts
+
+## Escalation
+If unable to resolve in 30 minutes, pause AI generation features via feature flag.
+```
+
+Store runbooks in `docs/runbooks/`. In your alerting tool (Better Uptime, PagerDuty, etc.), link each alert to its runbook URL.
+
+### Pattern 5: Distributed Request Correlation — Trace Errors Across Services
+
+When a user reports "I got an error", you need to find the exact log entry. Add a request ID to every request and propagate it through service calls.
+
+```typescript
+// middleware.ts — add X-Request-ID to every request
+import { NextResponse } from "next/server"
+import type { NextRequest } from "next/server"
+import crypto from "crypto"
+
+export function middleware(request: NextRequest) {
+  const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID()
+
+  const response = NextResponse.next()
+  response.headers.set("x-request-id", requestId)
+
+  return response
+}
+
+// lib/logger.ts — include requestId in every log entry
+export function createLogger(requestId: string) {
+  return {
+    info: (message: string, data?: object) =>
+      console.log(JSON.stringify({ level: "info", requestId, message, ...data, timestamp: new Date().toISOString() })),
+    error: (message: string, error?: unknown) =>
+      console.error(JSON.stringify({ level: "error", requestId, message, error: String(error), timestamp: new Date().toISOString() })),
+  }
+}
+
+// In route handler:
+// const requestId = req.headers.get("x-request-id") ?? crypto.randomUUID()
+// const log = createLogger(requestId)
+// log.info("Starting AI generation", { userId, feature: "chat" })
+
+// Return requestId in error responses so users can report it:
+// return Response.json({ success: false, error: "Something went wrong", requestId }, { status: 500 })
+```
+
+When a user reports a problem with a `requestId`, you can grep your logs: `grep "requestId:\"abc-123\"" logs/` to find the full request trace.
+
+### Pattern 6: Vercel Analytics Custom Events
 ```typescript
 // /lib/analytics.ts — centralise all tracking calls
 import { track } from "@vercel/analytics";

@@ -1,3 +1,7 @@
+---
+name: database-storage
+description: Designs database schemas and storage layers for AI products. Use when designing tables, choosing between SQL, NoSQL or Vector DB, setting up Prisma or Supabase, or adding Row Level Security.
+---
 # Skill: Database & Storage
 
 ```json
@@ -352,6 +356,24 @@ A vector database stores the *meaning* of text as numbers (called embeddings). I
 
 When in doubt for a new project: **start with Supabase client, migrate to Prisma when queries get complex.**
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Database
+- ORM: Prisma — schema at `prisma/schema.prisma`
+- DB: PostgreSQL via Supabase
+- Connection: PgBouncer port 6543, connection_limit=1 per serverless instance
+- Direct URL: port 5432 — used only for migrations
+- RLS: enabled on all user-scoped tables
+- Soft deletes: deletedAt DateTime? on all user-facing tables
+- UUID PKs: @default(cuid()) on all tables
+- Audit table: ai_generations — tracks all AI usage for cost and compliance
+- Indexes: userId, status, createdAt on all tables with those columns
+- N+1 prevention: always use include/select for relations, never query in loops
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -502,6 +524,150 @@ CREATE INDEX idx_embeddings_entity ON embeddings(entity_id, entity_type);
 CREATE INDEX idx_embeddings_vector ON embeddings
   USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 ```
+
+### Indexing Strategy Checklist
+
+Missing indexes are the most common production performance issue. Add these indexes to every table:
+
+```prisma
+// Every table that has a userId foreign key:
+@@index([userId])
+
+// Every table with status or type fields used in WHERE clauses:
+@@index([status])
+@@index([type])
+
+// Every table where you sort or filter by time:
+@@index([createdAt])
+
+// Soft-delete tables — partial index for active records only:
+// (Add this via raw SQL migration — Prisma doesn't support partial indexes natively)
+// CREATE INDEX idx_documents_active ON documents(user_id, created_at) WHERE deleted_at IS NULL;
+
+// Full-text search (if you add search functionality):
+// @@index([title], type: BTree)  -- for LIKE queries
+// Use tsvector for proper full-text search
+```
+
+**Signs you need an index:** EXPLAIN ANALYZE shows `Seq Scan` on a large table. Any query filtered by a column that doesn't have an index will scan the entire table.
+
+Run this query in Supabase SQL editor to find missing indexes:
+```sql
+SELECT
+  schemaname,
+  tablename,
+  attname as column_name,
+  n_live_tup as row_count,
+  idx_scan as index_scans
+FROM pg_stat_user_tables t
+JOIN pg_attribute a ON a.attrelid = t.relid
+WHERE n_live_tup > 1000
+  AND idx_scan = 0
+ORDER BY n_live_tup DESC;
+```
+
+### N+1 Prevention with Prisma — The Most Common Prisma Performance Bug
+
+N+1 happens when you fetch a list of items, then make a separate DB query for each item.
+
+```typescript
+// ❌ N+1 — this makes 1 query for documents + 1 query per document for user = N+1 total
+const documents = await db.document.findMany({ where: { userId } })
+for (const doc of documents) {
+  const user = await db.user.findUnique({ where: { id: doc.userId } })  // N extra queries!
+  console.log(user.name, doc.title)
+}
+
+// ✅ Single query with include — Prisma joins in one round trip
+const documents = await db.document.findMany({
+  where: { userId },
+  include: {
+    user: { select: { name: true, email: true } },  // only select what you need
+    chunks: { select: { id: true } },               // avoid select: true on large relations
+  }
+})
+
+// ✅ For complex cases, use select instead of include for smaller payloads
+const documents = await db.document.findMany({
+  where: { userId },
+  select: {
+    id: true,
+    title: true,
+    createdAt: true,
+    user: { select: { name: true } },
+    _count: { select: { chunks: true } },  // get count without loading all chunks
+  }
+})
+```
+
+**Debug N+1:** Enable Prisma query logging (`log: ["query"]`) in development and count the DB calls in your terminal for any list endpoint.
+
+### Zero-Downtime Migrations — The Expand-Then-Contract Pattern
+
+Dropping a column or renaming a field while the app is running breaks existing instances.
+
+**Safe migration pattern (3 steps):**
+
+```
+Step 1 — EXPAND: Add the new column (nullable), deploy new code that writes to both old and new
+Step 2 — BACKFILL: Write a one-time script to populate the new column for existing rows
+Step 3 — CONTRACT: Deploy code that reads only from new column, then drop the old column
+
+Example: renaming `full_name` to `display_name`
+
+Migration 1 (expand):
+  ALTER TABLE users ADD COLUMN display_name VARCHAR;
+
+Application code update:
+  // Write to both during transition
+  await db.user.update({ where: { id }, data: { fullName: name, displayName: name } })
+
+Migration 2 (backfill):
+  UPDATE users SET display_name = full_name WHERE display_name IS NULL;
+
+Migration 3 (contract — run after all instances use new column):
+  ALTER TABLE users DROP COLUMN full_name;
+```
+
+```typescript
+// prisma/migrations/backfill-display-name.ts — run manually as a one-time script
+async function backfill() {
+  const users = await db.user.findMany({ where: { displayName: null } })
+  for (const user of users) {
+    await db.user.update({
+      where: { id: user.id },
+      data: { displayName: user.fullName }
+    })
+  }
+  console.log(`Backfilled ${users.length} users`)
+}
+backfill()
+```
+
+### Connection Pool Sizing for Serverless
+
+Prisma's default pool size is 10 connections per instance. With serverless (Vercel), you can have 100 concurrent function instances — that's 1,000 simultaneous DB connections. Most databases allow 25–100 max connections.
+
+**Use PgBouncer + `connection_limit=1`:**
+
+```
+# .env
+# For serverless app traffic — goes through PgBouncer (port 6543 on Supabase)
+DATABASE_URL="postgres://[user]:[pass]@[host]:6543/[db]?pgbouncer=true&connection_limit=1"
+
+# For Prisma migrations — bypasses PgBouncer (port 5432)
+DIRECT_URL="postgres://[user]:[pass]@[host]:5432/[db]"
+```
+
+```prisma
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")   // pgbouncer for app
+  directUrl = env("DIRECT_URL")     // direct for migrations
+}
+```
+
+With `connection_limit=1`, each serverless invocation uses exactly 1 connection, PgBouncer pools them efficiently. Monitor `SELECT count(*) FROM pg_stat_activity` in Supabase SQL editor — should stay well below your database's max_connections.
 
 ### Pattern 4: Prisma Schema Starter
 ```prisma

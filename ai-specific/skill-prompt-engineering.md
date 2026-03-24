@@ -1,3 +1,7 @@
+---
+name: prompt-engineering
+description: Writes system prompts that produce consistent, parseable AI outputs every time. Use when AI outputs are inconsistent, when JSON parsing fails, when the AI ignores instructions, or when migrating between models.
+---
 # Skill: Prompt Engineering
 
 ```json
@@ -643,6 +647,24 @@ temperature: 0.7  // Some variety while staying coherent
 
 ### Rule 4: Validate AI Output Before Using It
 No matter how good your prompt is, validate structured AI output with Zod (TypeScript) or Pydantic (Python) before using it in application logic. See `skill-agentic-workflows.md` for the validation pattern.
+
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+After implementing your prompt architecture, capture these decisions in your `AGENT_CONTEXT.md` so every future coding session knows exactly where prompts live and how they're structured:
+
+```md
+## Prompt Engineering
+- Prompt location: lib/prompts/ — one file per feature (e.g., lib/prompts/chat.ts)
+- Prompt format: XML-tagged sections (system instructions, context, user input separated)
+- JSON enforcement: response_format: { type: "json_object" } + Zod validation wrapper
+- Few-shot examples: included in prompts that need consistent output format
+- Versioning: prompts exported as named constants — changes tracked in git diff
+- Temperature: [X] for deterministic tasks (0.0–0.3); [Y] for creative tasks (0.7–1.0)
+```
+
+**Why this matters:** Prompt changes are silent breaking changes. When your coding agent writes a new feature that calls the same prompt, it needs to know the exact prompt structure to pass the right variables in the right XML tags.
 
 </security_guardrails>
 

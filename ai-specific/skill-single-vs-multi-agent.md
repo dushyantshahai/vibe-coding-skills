@@ -1,3 +1,7 @@
+---
+name: single-vs-multi-agent
+description: Decides whether an AI feature needs one agent or multiple coordinated agents. Use this first before designing any AI feature — it contains the decision tree, three architecture patterns, and the upgrade triggers for moving from single to multi-agent.
+---
 # Skill: Single-Agent vs Multi-Agent Architecture
 
 ```json
@@ -185,6 +189,51 @@ it fails)                             YES  │  NO
 | Single Agent | Low | $ | High | Almost always — start here |
 | Sequential Multi | Medium | $$ | Medium | When quality clearly improves |
 | Parallel/Dynamic | High | $$$ | Low | When latency is the bottleneck |
+
+## Human-in-the-Loop Checkpoints
+
+Never build fully autonomous agents for high-stakes actions (sending emails, posting content, making payments, deleting data) without a human approval step. The pattern:
+
+```typescript
+// lib/agents/hitl.ts — Human-in-the-Loop checkpoint
+
+// 1. Agent produces a draft action
+// 2. Save it to DB with status: "pending_approval"
+// 3. Notify user (email/UI notification)
+// 4. User reviews and approves/rejects via UI
+// 5. A separate route executes the approved action
+
+// In your DB schema (Prisma):
+// model AgentAction {
+//   id          String   @id @default(cuid())
+//   userId      String
+//   type        String   // "send_email" | "post_content" | "delete_records"
+//   payload     Json     // the full action details for human review
+//   status      String   @default("pending_approval") // "pending_approval" | "approved" | "rejected" | "executed"
+//   agentReason String   // why the agent wants to take this action
+//   createdAt   DateTime @default(now())
+// }
+
+// app/api/agent/actions/approve/route.ts
+export async function POST(req: Request) {
+  const { userId } = await auth()
+  const { actionId } = await req.json()
+
+  const action = await db.agentAction.findUniqueOrThrow({ where: { id: actionId } })
+
+  // Security: user can only approve their own actions
+  if (action.userId !== userId) throw new Error("Forbidden")
+  if (action.status !== "pending_approval") throw new Error("Action already processed")
+
+  // Execute the approved action
+  await executeAction(action)
+  await db.agentAction.update({ where: { id: actionId }, data: { status: "executed" } })
+
+  return Response.json({ success: true })
+}
+```
+
+**Rule of thumb:** If an action cannot be undone in < 30 seconds, require human approval.
 
 ## The Upgrade Triggers
 
@@ -437,6 +486,23 @@ In every other situation, a well-prompted single agent is faster, cheaper, and e
 
 ---
 
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+After setting up your multi-agent architecture, capture these decisions:
+
+```md
+## Multi-Agent Architecture
+- Pattern: [sequential pipeline | parallel fan-out | router | critic]
+- Orchestrator location: `lib/agents/pipeline.ts`
+- Agent definitions: `lib/agents/` — one file per agent role
+- Human-in-the-loop: [enabled for: send_email, post_content | disabled]
+- AgentAction table: [exists | not needed]
+- Failure strategy: [fail-fast | partial results with failedAt tracking]
+- Max parallel agents: [X] — budget constraint
+```
+
+---
+
 ### "The AI agent design pattern I see everywhere — is it actually good?"
 
 The "orchestrator + 10 sub-agents" pattern you see in demos and tutorials is often over-engineered for real products. It emerged from AI research contexts where the goal was capability, not product quality. For a product shipped to real users:
@@ -521,6 +587,52 @@ Document your decision before building. This is valuable for future AI agent ses
 <common_patterns>
 
 ## Reusable Architecture Patterns
+
+### Pattern 0: Failure Isolation Between Agents
+
+In a multi-agent pipeline, one agent's failure should not crash the pipeline. Use `Promise.allSettled` for parallel agents and explicit try/catch for sequential agents:
+
+```typescript
+// lib/agents/pipeline.ts
+
+// Parallel agents with failure isolation
+export async function runParallelAgents<T>(
+  agents: Array<() => Promise<T>>,
+  labels: string[]
+): Promise<Array<T | null>> {
+  const results = await Promise.allSettled(agents.map(fn => fn()))
+
+  return results.map((result, i) => {
+    if (result.status === "fulfilled") {
+      return result.value
+    } else {
+      console.error(`[agent:${labels[i]}] failed:`, result.reason)
+      // Log to Sentry but don't crash the pipeline
+      Sentry.captureException(result.reason, { extra: { agentLabel: labels[i] } })
+      return null  // Downstream agents must handle null gracefully
+    }
+  })
+}
+
+// Sequential agents with per-step failure handling
+export async function runSequentialPipeline<T>(
+  steps: Array<{ name: string; fn: (input: T) => Promise<T> }>,
+  initialInput: T
+): Promise<{ result: T; failedAt: string | null }> {
+  let current = initialInput
+
+  for (const step of steps) {
+    try {
+      current = await step.fn(current)
+    } catch (err) {
+      console.error(`[pipeline:${step.name}] failed — returning partial result`)
+      return { result: current, failedAt: step.name }
+    }
+  }
+
+  return { result: current, failedAt: null }
+}
+```
 
 ### Pattern 1: The Critic Pattern (Most Valuable Multi-Agent Addition)
 ```typescript
@@ -647,6 +759,41 @@ An agent responsible for fetching data should not have permission to write data.
 
 ### Rule 4: Log Every Agent-to-Agent Communication
 When debugging a multi-agent failure, you need to know exactly what each agent received and produced. Log the full input and output of each agent step.
+
+### Rule 5: Estimate Cost Before Running Expensive Multi-Agent Pipelines
+
+Parallel multi-agent runs can trigger 20+ LLM calls simultaneously. Estimate cost before committing:
+
+```typescript
+// lib/agents/cost-estimate.ts
+const COST_PER_1M_TOKENS = {
+  "gpt-4o-2024-08-06": { input: 2.50, output: 10.00 },
+  "gpt-4o-mini-2024-07-18": { input: 0.15, output: 0.60 },
+  "claude-opus-4-6": { input: 15.00, output: 75.00 },
+}
+
+export function estimateAgentRunCost(config: {
+  model: keyof typeof COST_PER_1M_TOKENS
+  estimatedSteps: number
+  avgInputTokensPerStep: number
+  avgOutputTokensPerStep: number
+}): { estimatedUsd: number; warning: string | null } {
+  const pricing = COST_PER_1M_TOKENS[config.model]
+  const totalInput = config.estimatedSteps * config.avgInputTokensPerStep
+  const totalOutput = config.estimatedSteps * config.avgOutputTokensPerStep
+
+  const estimatedUsd =
+    (totalInput / 1_000_000) * pricing.input +
+    (totalOutput / 1_000_000) * pricing.output
+
+  return {
+    estimatedUsd,
+    warning: estimatedUsd > 0.50
+      ? `This agent run could cost ~$${estimatedUsd.toFixed(2)}. Consider using a cheaper model for intermediate steps.`
+      : null
+  }
+}
+```
 
 </security_guardrails>
 

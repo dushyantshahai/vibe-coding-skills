@@ -1,3 +1,7 @@
+---
+name: testing-strategy
+description: Defines what to test, when, and which test type to write for AI products. Use before writing any test, when deciding between unit, integration, and E2E tests, or when prioritising test coverage on a limited schedule.
+---
 # Skill: Testing Strategy
 
 ```json
@@ -421,6 +425,21 @@ After your AI agent generates tests, review them with this filter:
 - Would this test actually catch a real bug? If the answer is "the function would have to be completely broken for this to fail" — delete it.
 - Is there a real edge case that is NOT tested? (null inputs, empty arrays, timezone edge cases, very long strings) — add those.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Testing Strategy
+- Philosophy: testing trophy — most investment in integration, least in E2E
+- AI test approach: structural/constraint assertions + judge LLM for quality
+- Test environments: local (Docker/Supabase local), CI (ephemeral GitHub Actions), staging
+- Coverage minimum: 70% on lib/ and app/api/ — enforced in vitest.config.ts
+- Load test: k6 against staging — run before major feature launches
+- Load test threshold: p95 < 10s, error rate < 5%, at [X] concurrent users
+- Priority matrix: auth/payments = critical; UI rendering = visual review only
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -473,7 +492,105 @@ npm test -- --coverage
 
 ## Reusable Test Patterns
 
-### Pattern 1: Test Utilities Setup
+### Pattern 1: Load Testing for AI Endpoints — Before They Surprise You in Production
+
+AI endpoints are expensive under load. A sudden spike can run up thousands of dollars in minutes AND exhaust your API rate limits simultaneously. Test before users find this for you.
+
+```typescript
+// scripts/load-test-ai.ts — simple load test using k6 or wrk
+// Install k6: brew install k6
+```
+
+```javascript
+// load-test-chat.js — run with: k6 run load-test-chat.js
+import http from "k6/http"
+import { check, sleep } from "k6"
+
+export const options = {
+  stages: [
+    { duration: "30s", target: 5 },   // ramp to 5 concurrent users
+    { duration: "1m",  target: 10 },  // hold at 10 — your expected peak
+    { duration: "30s", target: 0 },   // ramp down
+  ],
+  thresholds: {
+    http_req_duration: ["p95<10000"],  // 95% of requests complete in < 10 seconds
+    http_req_failed:   ["rate<0.05"],  // < 5% error rate
+  }
+}
+
+export default function () {
+  const res = http.post(
+    "https://your-staging-app.vercel.app/api/chat",
+    JSON.stringify({ message: "Summarize my documents" }),
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer TEST_TOKEN",
+      },
+    }
+  )
+
+  check(res, {
+    "status 200": (r) => r.status === 200,
+    "has response": (r) => r.body.length > 0,
+  })
+
+  sleep(2)  // 2 second pause between requests per user
+}
+```
+
+**What to check after load testing:**
+- Sentry error rate (should be < 5%)
+- Supabase connection count (should stay well below max_connections)
+- OpenAI rate limit logs (check for 429s)
+- Vercel function timeout logs (check for > 60s executions)
+- AI cost for the load test run (your cost per concurrent user at peak)
+
+Run load tests against your **staging** environment, never production.
+
+### Pattern 1b: Test Environment Management
+
+| Environment | Database | When to Use |
+|---|---|---|
+| local | local Docker PostgreSQL or Supabase local | Day-to-day development |
+| test (CI) | ephemeral PostgreSQL via GitHub Actions services | Every PR in CI |
+| staging | shared staging database | Integration/E2E tests after PR merge |
+| production | production database | Smoke tests only, never load tests |
+
+**Ephemeral test DB in GitHub Actions** (see skill-automated-testing for the full workflow). The key principle: each CI run gets a fresh database, seeded from fixtures, and destroyed after. This prevents test pollution — one test's data never affects another test's result.
+
+```typescript
+// tests/setup.ts — runs before every test suite
+import { db } from "@/lib/db"
+import { execSync } from "child_process"
+
+beforeAll(async () => {
+  // Run migrations on the test database
+  execSync("prisma migrate deploy", {
+    env: { ...process.env, DATABASE_URL: process.env.TEST_DATABASE_URL! }
+  })
+})
+
+afterEach(async () => {
+  // Clean tables between tests (faster than re-running migrations)
+  await db.$transaction([
+    db.aiGeneration.deleteMany(),
+    db.document.deleteMany(),
+    db.user.deleteMany(),
+  ])
+})
+
+afterAll(async () => {
+  await db.$disconnect()
+})
+```
+
+**Environment variable rules:**
+- `DATABASE_URL` — always points to the correct database for the current environment
+- Never hardcode connection strings in tests
+- Use `.env.test` for local test environment overrides (add to `.gitignore`)
+
+### Pattern 3: Test Utilities Setup
 ```typescript
 // /tests/utils/setup.ts
 import { vi } from "vitest";
@@ -522,7 +639,7 @@ export function createAuthenticatedRequest(
 }
 ```
 
-### Pattern 2: Standard Integration Test Structure
+### Pattern 4: Standard Integration Test Structure
 ```typescript
 // /tests/integration/reminders.test.ts
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -571,7 +688,7 @@ describe("POST /api/reminders/create", () => {
 });
 ```
 
-### Pattern 3: Unit Test for Pure Logic
+### Pattern 5: Unit Test for Pure Logic
 ```typescript
 // /tests/unit/parse-reminder-date.test.ts
 import { describe, it, expect } from "vitest";

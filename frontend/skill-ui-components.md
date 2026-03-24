@@ -1,3 +1,7 @@
+---
+name: ui-components
+description: Builds reusable, accessible UI component libraries using shadcn/ui and Tailwind. Use when creating shared buttons, cards, modals, skeleton loaders, empty states, or any UI primitive used across multiple pages.
+---
 # Skill: UI Components
 
 ```json
@@ -400,11 +404,215 @@ Accessibility means your app works for people who use keyboards (no mouse), scre
 - The element has no behaviour
 - It only exists in one place and will not be reused
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## UI Components
+- Component library: shadcn/ui — configured in components/ui/
+- Styling: Tailwind CSS — cn() utility in lib/utils.ts (clsx + tailwind-merge)
+- Core components: Button, Input, FormField, Card, Modal, Spinner, EmptyState, Badge, Toast, Skeleton
+- Focus trapping: useFocusTrap hook for Modal — hooks/use-focus-trap.ts
+- Form errors: FormField component with aria-invalid + role="alert" error messages
+- Component testing: React Testing Library — tests/unit/components/
+- Dark mode: dark: Tailwind prefix on all colour classes
+```
+
 </vibe_coder_bridge>
 
 ---
 
 <testing_and_qa>
+
+## Testing UI Components
+
+### Component Testing with React Testing Library
+
+Test that components render correctly and respond to interaction — not their implementation details.
+
+```typescript
+// tests/unit/components/button.test.tsx
+import { render, screen, fireEvent } from "@testing-library/react"
+import { Button } from "@/components/ui/button"
+
+describe("Button", () => {
+  it("renders with correct text", () => {
+    render(<Button>Click me</Button>)
+    expect(screen.getByRole("button", { name: "Click me" })).toBeInTheDocument()
+  })
+
+  it("shows loading state with aria-busy", () => {
+    render(<Button loading>Processing</Button>)
+    expect(screen.getByRole("button")).toHaveAttribute("aria-busy", "true")
+    expect(screen.getByRole("button")).toBeDisabled()
+  })
+
+  it("calls onClick when clicked", () => {
+    const handleClick = vi.fn()
+    render(<Button onClick={handleClick}>Click me</Button>)
+    fireEvent.click(screen.getByRole("button"))
+    expect(handleClick).toHaveBeenCalledOnce()
+  })
+
+  it("does not call onClick when disabled", () => {
+    const handleClick = vi.fn()
+    render(<Button onClick={handleClick} disabled>Click me</Button>)
+    fireEvent.click(screen.getByRole("button"))
+    expect(handleClick).not.toHaveBeenCalled()
+  })
+})
+
+// tests/unit/components/empty-state.test.tsx
+describe("EmptyState", () => {
+  it("renders title and description", () => {
+    render(<EmptyState title="No documents" description="Upload a file to get started" />)
+    expect(screen.getByText("No documents")).toBeInTheDocument()
+    expect(screen.getByText("Upload a file to get started")).toBeInTheDocument()
+  })
+})
+```
+
+**Testing checklist for components:**
+- Does it render without errors?
+- Do ARIA attributes update correctly with state changes?
+- Do interactive elements call the right handlers?
+- Does it handle edge cases (empty strings, very long text, undefined props)?
+
+### Modal Focus Trapping — Accessibility
+
+A modal that doesn't trap focus is unusable for keyboard-only users and fails WCAG 2.1 AA. When a modal opens, focus must stay within it; when it closes, focus returns to the trigger element.
+
+```typescript
+// hooks/use-focus-trap.ts
+import { useEffect, useRef } from "react"
+
+export function useFocusTrap(isOpen: boolean) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+
+    // Save the element that had focus before modal opened
+    previousFocusRef.current = document.activeElement as HTMLElement
+
+    // Focus the first focusable element in the modal
+    const focusable = containerRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )
+    focusable?.[0]?.focus()
+
+    // Trap Tab/Shift+Tab within the modal
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !containerRef.current) return
+
+      const focusableElements = Array.from(
+        containerRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])'
+        )
+      )
+
+      const firstEl = focusableElements[0]
+      const lastEl = focusableElements[focusableElements.length - 1]
+
+      if (e.shiftKey && document.activeElement === firstEl) {
+        e.preventDefault()
+        lastEl?.focus()
+      } else if (!e.shiftKey && document.activeElement === lastEl) {
+        e.preventDefault()
+        firstEl?.focus()
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown)
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown)
+      // Restore focus to the trigger element when modal closes
+      previousFocusRef.current?.focus()
+    }
+  }, [isOpen])
+
+  return containerRef
+}
+
+// Usage in Modal component:
+// const containerRef = useFocusTrap(isOpen)
+// <div ref={containerRef} role="dialog" aria-modal="true" aria-labelledby="modal-title">
+```
+
+### Form Field Error States — Connecting Validation to UI
+
+The Input component needs to display field-level validation errors from both client-side Zod schemas and server-side responses.
+
+```typescript
+// components/ui/form-field.tsx — wrapper that connects Zod errors to Input
+import { forwardRef } from "react"
+import { cn } from "@/lib/utils"
+
+interface FormFieldProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label: string
+  error?: string          // Zod error message or server error
+  description?: string    // helper text shown below field
+  required?: boolean
+}
+
+export const FormField = forwardRef<HTMLInputElement, FormFieldProps>(
+  ({ label, error, description, required, className, id, ...props }, ref) => {
+    const fieldId = id ?? label.toLowerCase().replace(/\s+/g, "-")
+    const errorId = `${fieldId}-error`
+    const descId = `${fieldId}-desc`
+
+    return (
+      <div className="space-y-1">
+        <label htmlFor={fieldId} className="text-sm font-medium text-gray-700 dark:text-gray-300">
+          {label}
+          {required && <span className="text-red-500 ml-1" aria-label="required">*</span>}
+        </label>
+
+        <input
+          ref={ref}
+          id={fieldId}
+          aria-describedby={[description && descId, error && errorId].filter(Boolean).join(" ") || undefined}
+          aria-invalid={error ? "true" : undefined}
+          className={cn(
+            "w-full rounded-md border px-3 py-2 text-sm",
+            "focus:outline-none focus:ring-2 focus:ring-blue-500",
+            error
+              ? "border-red-500 focus:ring-red-500"
+              : "border-gray-300 dark:border-gray-600",
+            className
+          )}
+          {...props}
+        />
+
+        {description && !error && (
+          <p id={descId} className="text-xs text-gray-500">{description}</p>
+        )}
+
+        {error && (
+          <p id={errorId} role="alert" className="text-xs text-red-600 flex items-center gap-1">
+            <span aria-hidden="true">⚠</span> {error}
+          </p>
+        )}
+      </div>
+    )
+  }
+)
+FormField.displayName = "FormField"
+```
+
+Usage with React Hook Form + Zod:
+```tsx
+<FormField
+  label="Email"
+  type="email"
+  required
+  error={form.formState.errors.email?.message}
+  {...form.register("email")}
+/>
+```
 
 ## Testing UI Components
 

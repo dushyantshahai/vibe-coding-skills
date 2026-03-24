@@ -1,3 +1,7 @@
+---
+name: automated-testing
+description: Sets up Vitest, writes unit and integration tests, and configures GitHub Actions CI. Use when building a test suite from scratch, testing AI output parsers, or blocking broken deploys with automated pipelines.
+---
 # Skill: Automated Testing
 
 ```json
@@ -455,6 +459,22 @@ You test the code around the AI, not the AI itself:
 
 The AI model's quality is not your responsibility to test. Your responsibility is: does your code behave correctly given any plausible AI output?
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Testing
+- Test runner: Vitest — config at vitest.config.ts
+- Test structure: tests/unit/, tests/integration/, tests/ai/, tests/e2e/
+- Coverage thresholds: 70% lines/functions on lib/ and app/api/
+- Mock rule: always mock AI/external services; never mock own business logic
+- Test factories: tests/utils/factories.ts — createUser(), createDocument(), etc.
+- CI: GitHub Actions — .github/workflows/ci.yml — runs on every PR
+- E2E: Playwright — tests/e2e/ — runs on deploy to staging
+- AI tests: structural/constraint assertions, not exact string matching
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -685,6 +705,95 @@ describe("parseReminderIntent", () => {
   });
 });
 ```
+
+### Pattern 5: Coverage Thresholds — Enforce Minimums in CI
+
+Without a coverage floor, coverage will silently regress over time as new code is added without tests.
+
+```typescript
+// vitest.config.ts — add coverage thresholds
+import { defineConfig } from "vitest/config"
+import react from "@vitejs/plugin-react"
+import path from "path"
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./tests/setup.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov", "html"],
+      include: ["lib/**/*.ts", "app/api/**/*.ts"],  // only measure what matters
+      exclude: ["lib/db/index.ts", "**/*.test.ts", "**/*.d.ts"],
+      thresholds: {
+        lines: 70,        // CI fails if overall line coverage drops below 70%
+        functions: 70,
+        branches: 60,
+        statements: 70,
+      }
+    }
+  },
+  resolve: {
+    alias: { "@": path.resolve(__dirname, "./") }
+  }
+})
+```
+
+**Coverage targets by code type:**
+| Code | Target | Reason |
+|---|---|---|
+| Auth middleware | 90%+ | High security impact |
+| Payment flows | 90%+ | Business critical |
+| AI prompt builders | 80%+ | Hard to debug in prod |
+| API route handlers | 70%+ | Core business logic |
+| UI components | 40%+ | Lower ROI, harder to test |
+| Config files | 0% | Not worth testing |
+
+Run with: `npx vitest run --coverage` — CI fails automatically if thresholds not met.
+
+### Pattern 6: Flaky Test Detection — Find Unreliable Tests Before They Block Shipping
+
+AI-dependent tests and timing-sensitive integration tests are prone to intermittent failures. A test that fails 10% of the time will block CI roughly 1 in 10 PRs.
+
+```yaml
+# .github/workflows/flaky-detector.yml — run weekly to find flaky tests
+name: Flaky Test Detector
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # every Monday at 6am
+
+jobs:
+  detect-flaky:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - run: npm ci
+
+      # Run the test suite 5 times — flag any test that fails at least once
+      - name: Run tests 5x
+        run: |
+          for i in {1..5}; do
+            echo "=== Run $i ==="
+            npx vitest run --reporter=json >> test-results.json || true
+          done
+
+      - name: Report flaky tests
+        run: |
+          # Parse test-results.json and list tests that had mixed pass/fail
+          node scripts/detect-flaky.js
+```
+
+```typescript
+// scripts/detect-flaky.ts — parses results and reports flaky tests
+// A test is "flaky" if it passed in some runs and failed in others
+// Add flaky tests to a quarantine list and fix them before they hit CI
+```
+
+**Quarantine pattern:** Add `it.skip("FLAKY: ...")` to mark known-flaky tests so they don't block CI. Create a GitHub issue for each flaky test and fix them in the next sprint.
 
 </common_patterns>
 

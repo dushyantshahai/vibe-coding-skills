@@ -1,3 +1,7 @@
+---
+name: frontend-architecture
+description: Structures frontend apps with clean component hierarchy, state management, and data flow. Use when starting a new frontend, when pages become unmanageable, or when deciding between TanStack Query, Zustand, and useState.
+---
 # Skill: Frontend Architecture
 
 ```json
@@ -428,6 +432,23 @@ You do **not** need global state for:
 
 **Simple rule:** Start every component as a Server Component. Add `"use client"` only when you get an error saying you need it (usually when adding `useState`, event handlers, or browser APIs). Never add `"use client"` pre-emptively.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Frontend Architecture
+- Framework: Next.js App Router — TypeScript
+- Component hierarchy: pages (app/) → features (components/features/) → primitives (components/ui/)
+- Server state: TanStack Query — `lib/hooks/use-[feature].ts`
+- Global UI state: Zustand — `lib/store/` — only for cross-component UI state
+- Local state: useState — for component-scoped UI state
+- Typed fetch: `lib/api/` — typed wrappers around fetch
+- Code splitting: dynamic() for rich text editors, charts, AI panels
+- Error boundaries: route level + around AI features + around third-party widgets
+- Performance: Web Vitals via next/web-vitals → PostHog custom events
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -490,6 +511,76 @@ UI bug or data not showing →
 <common_patterns>
 
 ## Reusable Architecture Patterns
+
+### Code Splitting — Lazy Load Heavy Components
+
+Every component you import increases your initial bundle size and slows first-load for users. Use `dynamic()` to lazy load components that aren't needed immediately.
+
+```typescript
+// components/features/editor/rich-text-editor.tsx — heavy library (TipTap/Quill)
+import dynamic from "next/dynamic"
+
+// ✅ Only loads when the component is actually rendered
+const RichTextEditor = dynamic(
+  () => import("@/components/features/editor/rich-text-editor-impl"),
+  {
+    ssr: false,       // disable SSR for browser-only libraries
+    loading: () => <div className="h-64 bg-gray-100 animate-pulse rounded-lg" />,
+  }
+)
+
+// ✅ For AI components that are conditionally shown:
+const AIGenerationPanel = dynamic(
+  () => import("@/components/features/ai/generation-panel"),
+  { ssr: false }
+)
+
+// ✅ For heavy charting libraries:
+const AnalyticsChart = dynamic(
+  () => import("@/components/features/analytics/chart"),
+  { loading: () => <div className="h-48 bg-gray-100 animate-pulse" /> }
+)
+```
+
+**When to use dynamic imports:**
+- Rich text editors (TipTap, Quill, Slate) — large bundle sizes
+- Chart libraries (Recharts, Chart.js) — only needed on analytics pages
+- AI generation panels — not needed on landing page
+- Any component using browser-only APIs (window, document, canvas)
+- Any import > 50kb (check with `next build` and examine bundle analysis)
+
+**Bundle analysis:** Add `ANALYZE=true npm run build` with `@next/bundle-analyzer` to see exactly what's in your bundle.
+
+### Error Boundary Placement Strategy
+
+Error boundaries catch component-level crashes and prevent one broken component from taking down the whole page. Place them strategically:
+
+```tsx
+// app/(app)/layout.tsx — catch auth/layout crashes
+<ErrorBoundary fallback={<FullPageError />}>
+  {children}
+</ErrorBoundary>
+
+// For AI generation components — crashes here shouldn't affect the rest of the page
+<ErrorBoundary
+  fallback={<div>AI generation failed. <button onClick={reset}>Try again</button></div>}
+  onError={(err) => Sentry.captureException(err, { tags: { feature: "ai-generation" } })}
+>
+  <AIGenerationPanel />
+</ErrorBoundary>
+
+// For third-party widgets (Stripe Elements, auth components) — isolate their failures
+<ErrorBoundary fallback={<PaymentFormError />}>
+  <StripePaymentForm />
+</ErrorBoundary>
+```
+
+**Placement rules:**
+1. Route level — always (catches page-level crashes)
+2. Around AI features — always (AI components have more runtime failure modes)
+3. Around third-party widgets — always (you don't control their code)
+4. Around individual cards/sections — optional, only if they're independent features
+5. Around every single component — never (overhead isn't worth it)
 
 ### Pattern 1: Standard Page Structure (Next.js App Router)
 ```typescript

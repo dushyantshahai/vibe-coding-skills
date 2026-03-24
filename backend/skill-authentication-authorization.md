@@ -1,3 +1,7 @@
+---
+name: authentication-authorization
+description: Implements login, session management, and role-based access control. Use when adding user accounts, protecting routes, setting up Clerk or Supabase Auth, OAuth, or multi-role permissions.
+---
 # Skill: Authentication & Authorization
 
 ```json
@@ -384,6 +388,21 @@ You do not need to choose — your auth provider handles this for you. But under
 
 Clerk uses JWTs. Supabase Auth uses both depending on setup. For most apps: you will never need to think about this if you use an auth provider.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Authentication & Authorization
+- Auth provider: [Clerk | Supabase Auth]
+- Auth helper: `lib/auth/index.ts` — requireAuth(), getCurrentUser()
+- RBAC: [implemented — roles: owner, admin, member | not needed]
+- API keys: [implemented for B2B — lib/auth/api-keys.ts | not applicable]
+- Auth audit log: AuthAuditLog table — events: sign_in, permission_denied, role_changed
+- Session scope: userId always from verified JWT — never from client body
+- Multi-tenant isolation: RLS enabled on all user-scoped tables
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -536,6 +555,129 @@ export async function requireRole(userId: string, requiredRole: Role) {
   }
 
   return { authorized: true, error: null, role: userRole };
+}
+```
+
+### Audit Logging for Auth Events — Tracking User Access and Permission Changes
+
+Log all authentication and authorization events. This is your forensic trail after a breach, and a compliance requirement for many business customers.
+
+```typescript
+// lib/auth/audit.ts
+type AuthEvent =
+  | "sign_in"
+  | "sign_out"
+  | "sign_in_failed"
+  | "permission_denied"
+  | "role_changed"
+  | "api_key_created"
+  | "api_key_revoked"
+  | "password_reset"
+
+export async function logAuthEvent({
+  userId,
+  event,
+  ipAddress,
+  userAgent,
+  metadata = {},
+}: {
+  userId: string
+  event: AuthEvent
+  ipAddress?: string
+  userAgent?: string
+  metadata?: Record<string, unknown>
+}) {
+  await db.authAuditLog.create({
+    data: {
+      userId,
+      event,
+      ipAddress,
+      userAgent,
+      metadata,
+      createdAt: new Date(),
+    },
+  })
+}
+
+// Usage in middleware or route handler:
+// await logAuthEvent({ userId, event: "permission_denied", ipAddress: req.headers.get("x-forwarded-for") ?? "" })
+
+// Prisma schema addition:
+// model AuthAuditLog {
+//   id         String   @id @default(cuid())
+//   userId     String
+//   event      String
+//   ipAddress  String?
+//   userAgent  String?
+//   metadata   Json     @default("{}")
+//   createdAt  DateTime @default(now())
+//   @@index([userId])
+//   @@index([createdAt])
+// }
+```
+
+### API Key Management for B2B — Programmatic Access Without Passwords
+
+When business customers need to access your API programmatically (not via browser), issue API keys as an alternative auth method. Never store raw keys.
+
+```typescript
+// lib/auth/api-keys.ts
+import crypto from "crypto"
+
+// Generate a new API key
+export function generateApiKey(): { rawKey: string; hashedKey: string; keyPrefix: string } {
+  const rawKey = `sk_live_${crypto.randomBytes(32).toString("hex")}`
+  const hashedKey = crypto.createHash("sha256").update(rawKey).digest("hex")
+  const keyPrefix = rawKey.substring(0, 12)  // show prefix in UI for identification
+
+  return { rawKey, hashedKey, keyPrefix }
+}
+
+// Store only the hash + prefix — NEVER the raw key
+export async function createApiKey(userId: string, name: string) {
+  const { rawKey, hashedKey, keyPrefix } = generateApiKey()
+
+  await db.apiKey.create({
+    data: { userId, name, hashedKey, keyPrefix }
+  })
+
+  // Show rawKey to user ONCE — they must copy it now
+  return { rawKey, keyPrefix, name }
+}
+
+// Verify incoming API key
+export async function verifyApiKey(incomingKey: string): Promise<string | null> {
+  const hashedKey = crypto.createHash("sha256").update(incomingKey).digest("hex")
+
+  const apiKey = await db.apiKey.findFirst({
+    where: { hashedKey, revokedAt: null }
+  })
+
+  if (!apiKey) return null
+
+  // Update last used timestamp
+  await db.apiKey.update({
+    where: { id: apiKey.id },
+    data: { lastUsedAt: new Date() }
+  })
+
+  return apiKey.userId
+}
+
+// In API route middleware — accept both session auth and API key auth:
+export async function flexibleAuth(req: Request): Promise<string> {
+  // Try session auth first (browser users)
+  const { userId } = await auth()
+  if (userId) return userId
+
+  // Try API key auth (programmatic clients)
+  const apiKey = req.headers.get("x-api-key")
+  if (apiKey) {
+    const userId = await verifyApiKey(apiKey)
+    if (userId) return userId
+  }
+
+  throw new Error("Unauthorized")
 }
 ```
 

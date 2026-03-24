@@ -173,7 +173,14 @@ App: RemindAI, Stack: Next.js + Supabase, Auth: Clerk
 ```
 Expected: The assistant generates a route with auth check, Zod validation, error handling, and a verify step — without being asked for any of these.
 
-If all three work correctly, your assistant is fully operational.
+**Test 4 — AGENT_CONTEXT.md awareness**
+```
+I just set up Clerk auth, Supabase with pgvector, and deployed to Vercel.
+What should I add to my AGENT_CONTEXT.md?
+```
+Expected: The assistant draws from the AGENT_CONTEXT.md callouts in `skill-authentication-authorization`, `skill-database-storage`, and `skill-deployment-hosting` and returns a structured template populated with the decisions you just made.
+
+If all four work correctly, your assistant is fully operational.
 
 ---
 
@@ -212,6 +219,27 @@ The single habit that makes the most difference. At the start of every conversat
 ```
 
 This takes 60 seconds and prevents the assistant from assuming the wrong stack, hallucinating files that don't exist, or suggesting things you've already built differently.
+
+---
+
+### Maintaining Your AGENT_CONTEXT.md — The Memory Layer
+
+Every skill in this set ends with a **🗂️ Update Your AGENT_CONTEXT.md** callout that lists exactly what to capture after implementing that skill. Follow it.
+
+Create a file called `AGENT_CONTEXT.md` at the root of your project. After implementing each skill, copy the relevant callout into it and fill in your specific choices. Over time it becomes a living record of every architectural decision in your codebase.
+
+**Start every new conversation with:**
+```
+Here is my project context — read this before we start:
+
+[paste AGENT_CONTEXT.md contents]
+
+Today I'm building: [one specific thing]
+```
+
+This is how you eliminate "the agent doesn't remember what we built last session." It doesn't need to remember — you're telling it. The quality of the Vibe Coder Assistant's responses compounds directly with the quality of your AGENT_CONTEXT.md.
+
+See `skill-product-documentation` for the full AGENT_CONTEXT.md template.
 
 ---
 
@@ -274,6 +302,8 @@ A: When you pull the latest version of this repo, re-upload the changed files in
 | Assistant builds multiple things at once | It's honouring a request that's too broad — rephrase to one specific thing |
 | Wrong skill applied | Explicitly name the skill in your prompt: "Using the RAG skill..." |
 | Context lost mid-conversation | Paste the context anchor JSON again — long conversations can lose early context |
+| Each session feels disconnected — agent re-debates decided patterns | You need an `AGENT_CONTEXT.md` — follow `skill-product-documentation` to create one, then paste it at the start of every session |
+| Agent suggests a tool/pattern that conflicts with what's already built | Your `AGENT_CONTEXT.md` is missing that decision — add it and it won't happen again |
 
 ---
 

@@ -1,3 +1,7 @@
+---
+name: product-documentation
+description: Writes PRDs, tech specs, and AGENT_CONTEXT.md files that ground AI coding agents in your project. Use before starting any significant feature, when the AI agent keeps building the wrong thing, or when sessions start from zero every time.
+---
 # Skill: Product Documentation
 
 ```json
@@ -648,8 +652,28 @@ You write AGENT_CONTEXT.md in week 1. By week 6, the stack has changed, new feat
 **Fix:** Update AGENT_CONTEXT.md at the end of every session where something significant changed. Treat it as a living document.
 
 ### ❌ Tech Specs That Describe Architecture Instead of Build Steps
-A spec that explains database theory or API design philosophy instead of "Step 1: create this table with these columns" is useless for a coding agent.  
+A spec that explains database theory or API design philosophy instead of "Step 1: create this table with these columns" is useless for a coding agent.
 **Fix:** Every tech spec must have a numbered build order with verifiable steps.
+
+---
+
+### 🗂️ This Skill's Output IS Your AGENT_CONTEXT.md
+
+Unlike other skills where you update your AGENT_CONTEXT.md with decisions made, this skill's primary deliverable — the AGENT_CONTEXT.md file you create by following the template above — is itself the output.
+
+After implementing the documentation patterns from this skill:
+
+```md
+## Documentation Architecture (add to your AGENT_CONTEXT.md)
+- PRD location: docs/prd/ — one file per major feature
+- Tech specs: docs/specs/ — implementation details, linked from PRDs
+- ADR log: docs/adr/ — one file per architectural decision
+- AGENT_CONTEXT.md: /AGENT_CONTEXT.md — root of repo, kept current
+- API docs: docs/api/ — auto-generated from Zod schemas where possible
+- Update cadence: AGENT_CONTEXT.md reviewed at start of each sprint
+```
+
+**The meta-principle:** Every other skill in this set produces an architectural decision. This skill provides the system for capturing all of those decisions. Use the AGENT_CONTEXT.md template from this skill as your root document, and populate each section as you implement each other skill.
 
 </mistakes_to_avoid>
 

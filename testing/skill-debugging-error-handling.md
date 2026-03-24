@@ -1,3 +1,7 @@
+---
+name: debugging-error-handling
+description: Fixes bugs systematically using a structured diagnosis process and adds production error handling. Use when stuck on any bug, when setting up Sentry, when adding structured logging, or when errors are silently swallowed.
+---
 # Skill: Debugging & Error Handling
 
 ```json
@@ -415,6 +419,21 @@ Sentry is a service that automatically captures and organises every error that h
 
 **Debugging rule:** 4xx errors are usually fixable in the frontend or the request. 5xx errors require you to check the server logs.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Error Handling
+- Error class: AppError with factory errors — `lib/errors/index.ts`
+- Error handler: handleError() — used in all route catch blocks
+- Error boundary: React ErrorBoundary with Sentry — `components/error-boundary.tsx`
+- Logger: structured JSON in prod, coloured in dev — `lib/logger.ts`
+- Request correlation: requestId in all error responses (from X-Request-ID header)
+- Async safety: all route handlers wrapped in try/catch
+- AI failure checklist: token limit, content policy, rate limit, JSON parse, streaming timeout, model pinning
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -625,6 +644,85 @@ export async function GET() {
 }
 ```
 
+### Pattern 5: AI-Specific Failure Debug Checklist
+
+AI failures look different from regular API failures. When AI features aren't working, work through this checklist:
+
+```
+AI Feature Not Working — Debug in this order:
+
+□ 1. TOKEN LIMIT EXCEEDED
+   Symptom: Response cuts off mid-sentence, or error "context_length_exceeded"
+   Check: Log prompt token count before sending. Use tiktoken to count:
+     import { encoding_for_model } from "tiktoken"
+     const enc = encoding_for_model("gpt-4o")
+     const tokens = enc.encode(prompt).length
+   Fix: Reduce system prompt, trim conversation history, chunk input
+
+□ 2. CONTENT POLICY / MODERATION BLOCK
+   Symptom: API returns 400 with "content_policy_violation" or empty response
+   Check: Log the exact API error code and message
+   Fix: Review prompt for inadvertent policy triggers, run through moderation API first
+
+□ 3. RATE LIMIT (OpenAI/Anthropic)
+   Symptom: 429 errors, intermittent failures under load
+   Check: Check API dashboard for rate limit tier; look for 429s in Sentry
+   Fix: Implement exponential backoff (already in skill-api-design-integration);
+        request tier upgrade from provider
+
+□ 4. INVALID JSON IN STRUCTURED OUTPUT
+   Symptom: JSON.parse fails on model response, or Zod validation fails
+   Check: Log raw response before parsing
+   Fix: Use response_format: { type: "json_object" } + Zod validation wrapper;
+        add "respond only with valid JSON" to system prompt
+
+□ 5. STREAMING DISCONNECT
+   Symptom: Stream starts but stops before completion, client shows partial response
+   Check: Check Vercel function timeout (default 10s — AI routes need maxDuration: 60)
+          Check if edge runtime is set on streaming routes
+   Fix: Add export const runtime = "edge" to streaming routes;
+        set maxDuration: 60 in vercel.json for AI paths
+
+□ 6. WRONG MODEL BEHAVIOUR (seems like a different model)
+   Symptom: Model stopped following instructions it used to follow
+   Check: Are you using a pinned model version or a floating one ("gpt-4o" vs "gpt-4o-2024-08-06")?
+   Fix: Pin to a dated snapshot in lib/ai/models.ts
+```
+
+### Pattern 6: Error Correlation with Request IDs — Help Users Help You Debug
+
+When a user reports "I got an error", you need a way to find the exact server-side log entry. Return a `requestId` in every error response so users can report it to support.
+
+```typescript
+// Update your AppError and handleError to include requestId:
+export function handleError(err: unknown, requestId?: string): Response {
+  if (err instanceof AppError) {
+    return Response.json({
+      success: false,
+      error: err.code,
+      message: err.message,
+      requestId,  // include so user can report it
+    }, { status: err.statusCode })
+  }
+
+  const id = requestId ?? crypto.randomUUID()
+  Sentry.withScope((scope) => {
+    scope.setTag("requestId", id)
+    Sentry.captureException(err)
+  })
+
+  return Response.json({
+    success: false,
+    error: "INTERNAL_ERROR",
+    message: "Something went wrong. Reference ID: " + id,
+    requestId: id,
+  }, { status: 500 })
+}
+
+// In your frontend ErrorBoundary or error handler:
+// Show: "Error reference: {requestId} — copy this when contacting support"
+```
+
 </common_patterns>
 
 ---
@@ -723,8 +821,45 @@ You change 3 things to fix 1 bug. Two of those changes cause new bugs. Now you h
 **Fix:** One change per debug iteration. Verify before the next change.
 
 ### ❌ No Error State in Frontend Components
-The API call fails. The component shows a blank screen (or crashes). The user has no idea what happened.  
+The API call fails. The component shows a blank screen (or crashes). The user has no idea what happened.
 **Fix:** Every component that calls an API must handle three states: loading, success, and error. Always. No exceptions.
+
+### ❌ Unhandled Promise Rejections in Route Handlers
+
+In Next.js App Router, an async route handler that throws an unhandled error may return a 500 with no body — or in some edge cases, silently return a 200 with an empty body. Users see a broken experience with no error message.
+
+```typescript
+// ❌ This can silently fail:
+export async function POST(req: Request) {
+  const data = await req.json()
+  const result = await db.document.create({ data })  // if this throws, what happens?
+  return Response.json({ success: true, data: result })
+}
+
+// ✅ Always wrap async route handlers:
+export async function POST(req: Request) {
+  try {
+    const data = await req.json()
+    const result = await db.document.create({ data })
+    return Response.json({ success: true, data: result })
+  } catch (err) {
+    return handleError(err)  // your AppError handler from this skill
+  }
+}
+```
+
+**Global unhandled rejection guard** — add to your app entry point:
+
+```typescript
+// app/api/_init.ts (imported once in root layout or middleware)
+if (process.env.NODE_ENV === "production") {
+  process.on("unhandledRejection", (reason, promise) => {
+    console.error("[unhandledRejection]", { reason: String(reason) })
+    // Sentry will catch this automatically if initialized, but belt-and-suspenders:
+    Sentry.captureException(reason)
+  })
+}
+```
 
 </mistakes_to_avoid>
 

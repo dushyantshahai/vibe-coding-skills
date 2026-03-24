@@ -1,3 +1,7 @@
+---
+name: ai-streaming-ui
+description: Renders AI responses word-by-word using Vercel AI SDK and useChat. Use when building chat interfaces, AI generation panels, or any feature where users wait for an AI response and need to see it stream in real time.
+---
 # Skill: AI Streaming UI
 
 ```json
@@ -403,6 +407,22 @@ If 30 seconds is still not enough (e.g. very long document generation): move the
 1. Accept it — it resolves quickly and users are used to it from ChatGPT
 2. Use a streaming-aware Markdown renderer that handles partial syntax (react-markdown handles this reasonably well)
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## AI Streaming UI
+- SDK: Vercel AI SDK — useChat / useCompletion hooks
+- Streaming endpoint: app/api/chat/route.ts — edge runtime
+- Message persistence: onFinish callback saves to DB
+- Error handling: mid-stream error → StreamingMessage with retry button
+- Accessibility: StreamingContainer with role="log" aria-live="polite"
+- Auto-scroll: useAutoScroll hook — user can scroll up without losing position
+- Cancellation: stop() from useChat hook
+- Markdown rendering: react-markdown in StreamingMessage
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -481,6 +501,191 @@ Streaming issue →
 <common_patterns>
 
 ## Reusable Streaming Patterns
+
+### Mid-Stream Error Handling
+
+What happens if the stream drops after 50 tokens? Without error handling, users see a half-complete message and a frozen UI with no indication something went wrong.
+
+```typescript
+// components/features/chat/chat-message.tsx
+"use client"
+import { useState, useEffect } from "react"
+
+interface StreamingMessageProps {
+  content: string
+  isStreaming: boolean
+  hasError: boolean
+  onRetry?: () => void
+}
+
+export function StreamingMessage({ content, isStreaming, hasError, onRetry }: StreamingMessageProps) {
+  return (
+    <div className="prose max-w-none">
+      {content && <div>{content}</div>}
+
+      {isStreaming && !hasError && (
+        <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" aria-hidden="true" />
+      )}
+
+      {hasError && (
+        <div className="mt-2 flex items-center gap-2 text-sm text-red-500">
+          <span>Response interrupted.</span>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="underline hover:no-underline"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// In your useChat hook or custom streaming hook:
+const { messages, isLoading, error, reload } = useChat({
+  onError: (err) => {
+    // Distinguish between user-cancelled and actual errors
+    if (err.message !== "AbortError") {
+      setStreamError(true)
+      console.error("[stream:error]", err)
+    }
+  },
+})
+```
+
+### Accessible Streaming — Screen Reader Support
+
+A streaming AI response that updates every 50ms is not accessible to screen reader users unless the live region is configured correctly. Without `aria-live`, screen reader users receive no feedback that the AI is responding.
+
+```tsx
+// components/features/chat/streaming-container.tsx
+interface StreamingContainerProps {
+  isStreaming: boolean
+  children: React.ReactNode
+}
+
+export function StreamingContainer({ isStreaming, children }: StreamingContainerProps) {
+  return (
+    <div
+      role="log"
+      aria-live="polite"          // "polite" announces when the user is idle — correct for chat
+      aria-atomic="false"         // false = announce new additions, not the full content each time
+      aria-label="AI response"
+      aria-busy={isStreaming}     // screen readers know content is loading
+    >
+      {children}
+    </div>
+  )
+}
+
+// For status announcements (loading, error):
+export function StreamingStatus({ status }: { status: "idle" | "loading" | "error" | "complete" }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="sr-only"  // visually hidden, but read by screen readers
+    >
+      {status === "loading" && "AI is generating a response"}
+      {status === "complete" && "Response complete"}
+      {status === "error" && "Response failed. Please try again."}
+    </div>
+  )
+}
+```
+
+### Auto-Scroll to Bottom with User Override
+
+Chat UIs should auto-scroll as content streams in, but must stop auto-scrolling if the user manually scrolls up to read earlier messages.
+
+```typescript
+// hooks/use-auto-scroll.ts
+import { useEffect, useRef, useState } from "react"
+
+export function useAutoScroll(dependency: unknown) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [isUserScrolling, setIsUserScrolling] = useState(false)
+  const lastScrollTop = useRef(0)
+
+  // Detect when user scrolls up manually
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+
+    const handleScroll = () => {
+      const scrolledUp = el.scrollTop < lastScrollTop.current
+      const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
+
+      if (scrolledUp) setIsUserScrolling(true)
+      if (isAtBottom) setIsUserScrolling(false)  // back at bottom = resume auto-scroll
+
+      lastScrollTop.current = el.scrollTop
+    }
+
+    el.addEventListener("scroll", handleScroll, { passive: true })
+    return () => el.removeEventListener("scroll", handleScroll)
+  }, [])
+
+  // Auto-scroll unless user has scrolled up
+  useEffect(() => {
+    if (!isUserScrolling && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [dependency, isUserScrolling])
+
+  return { scrollRef, isUserScrolling }
+}
+
+// Usage:
+// const { scrollRef, isUserScrolling } = useAutoScroll(messages)
+// <div ref={scrollRef} className="overflow-y-auto h-full">
+//   {messages.map(...)}
+//   {isUserScrolling && (
+//     <button onClick={() => setIsUserScrolling(false)} className="sticky bottom-4 ...">
+//       ↓ Jump to latest
+//     </button>
+//   )}
+// </div>
+```
+
+### Persisting Messages When Streaming Completes
+
+The Vercel AI SDK's `useChat` hook doesn't automatically save messages to your database. Use the `onFinish` callback to persist completed messages:
+
+```typescript
+// app/api/chat/route.ts
+import { streamText } from "ai"
+import { openai } from "@ai-sdk/openai"
+
+export async function POST(req: Request) {
+  const { userId } = await requireAuth()
+  const { messages, conversationId } = await req.json()
+
+  const result = streamText({
+    model: openai("gpt-4o-2024-08-06"),
+    messages,
+    maxTokens: 1000,
+    onFinish: async ({ text, usage }) => {
+      // Save the completed AI response to DB after streaming is done
+      await db.message.create({
+        data: {
+          conversationId,
+          role: "assistant",
+          content: text,
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          userId,
+        }
+      })
+    }
+  })
+
+  return result.toDataStreamResponse()
+}
+```
 
 ### Pattern 1: Standard Chat API Route (Next.js + Vercel AI SDK)
 ```typescript

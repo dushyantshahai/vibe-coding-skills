@@ -1,3 +1,7 @@
+---
+name: growth-distribution
+description: Builds SEO, email sequences, push notifications, and referral mechanics. Use after core retention is solid, when building re-engagement systems, when setting up reminder notifications, or when adding organic acquisition.
+---
 # Skill: Growth & Distribution
 
 ```json
@@ -414,6 +418,21 @@ This is a retention problem, not a growth problem. The fix is almost always one 
 
 Address these in order. Most day-1 churn problems are problem #1. Fix that before building elaborate notification systems.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Growth & Distribution
+- Referral system: nanoid codes in Referral table — lib/growth/referral.ts
+- Referral attribution: tracked via cookie → webhook on user creation
+- Email sequences: Inngest — 3-email welcome sequence in lib/jobs/welcome-sequence.ts
+- Notification frequency caps: Upstash Redis — 3 emails/day, 2 push/day — lib/notifications/frequency-cap.ts
+- SEO: generateMetadata in each page — OG images via /api/og (Vercel OG)
+- Unsubscribe: one-click unsubscribe in every email — legal requirement
+- Re-engagement: scheduled digest cron — /api/cron/digest
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -630,6 +649,136 @@ export function getReferralUrl(code: string): string {
 }
 ```
 
+### Pattern 5: Referral Attribution Tracking — Complete the Referral Loop
+
+Generating referral links is only half the pattern. You also need to track when a referred user converts and attribute the conversion to the referrer.
+
+```typescript
+// middleware.ts — capture referral codes on landing
+export function middleware(request: NextRequest) {
+  const { searchParams } = request.nextUrl
+  const refCode = searchParams.get("ref")
+
+  if (refCode) {
+    const response = NextResponse.next()
+    // Store in cookie for 30 days — survives navigation and signup flow
+    response.cookies.set("referral_code", refCode, {
+      maxAge: 30 * 24 * 60 * 60,
+      httpOnly: true,
+      sameSite: "lax",
+    })
+    return response
+  }
+}
+
+// app/api/auth/webhook/route.ts — Clerk/Supabase webhook on user creation
+export async function POST(req: Request) {
+  const event = await req.json()
+
+  if (event.type === "user.created") {
+    const userId = event.data.id
+
+    // Get referral code from user's session cookie
+    // (Passed via webhook metadata or looked up from a pending_referrals table)
+    const referralCode = await getPendingReferralCode(userId)
+
+    if (referralCode) {
+      // Find the referrer
+      const referral = await db.referral.findFirst({
+        where: { code: referralCode, convertedAt: null }
+      })
+
+      if (referral) {
+        // Attribute the conversion
+        await db.referral.update({
+          where: { id: referral.id },
+          data: {
+            convertedUserId: userId,
+            convertedAt: new Date()
+          }
+        })
+
+        // Trigger reward for referrer (e.g., extend trial, add credits)
+        await inngest.send({
+          name: "referral/converted",
+          data: { referrerId: referral.userId, convertedUserId: userId }
+        })
+      }
+    }
+  }
+}
+```
+
+### Pattern 6: Open Graph and Twitter Card Tags — Rich Social Link Previews
+
+Social sharing is one of the highest-leverage distribution channels for AI products. Without OG tags, links shared on Twitter/X, LinkedIn, Slack, and iMessage show as plain text. With them, they show a rich preview card.
+
+```typescript
+// app/layout.tsx — default metadata (inherited by all pages)
+export const metadata: Metadata = {
+  title: {
+    default: "YourProduct — AI-powered [description]",
+    template: "%s | YourProduct",  // page-specific titles
+  },
+  description: "One sentence that explains the value proposition.",
+  openGraph: {
+    type: "website",
+    siteName: "YourProduct",
+    title: "YourProduct — AI-powered [description]",
+    description: "One sentence value proposition.",
+    images: [{
+      url: "https://yourproduct.com/og-image.png",  // 1200×630px
+      width: 1200,
+      height: 630,
+      alt: "YourProduct",
+    }],
+  },
+  twitter: {
+    card: "summary_large_image",  // shows large image preview
+    creator: "@yourhandle",
+    images: ["https://yourproduct.com/og-image.png"],
+  },
+}
+
+// app/(marketing)/[feature]/page.tsx — dynamic per-page OG image
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const feature = await db.feature.findUnique({ where: { slug: params.slug } })
+
+  return {
+    title: feature?.name,
+    openGraph: {
+      title: `${feature?.name} | YourProduct`,
+      description: feature?.description,
+      images: [{
+        // Dynamic OG image via Vercel OG:
+        url: `/api/og?title=${encodeURIComponent(feature?.name ?? "")}`,
+        width: 1200,
+        height: 630,
+      }]
+    }
+  }
+}
+```
+
+```typescript
+// app/api/og/route.tsx — dynamic OG image generator (Vercel OG)
+import { ImageResponse } from "next/og"
+
+export const runtime = "edge"
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url)
+  const title = searchParams.get("title") ?? "YourProduct"
+
+  return new ImageResponse(
+    <div style={{ display: "flex", width: "100%", height: "100%", background: "#0f172a", alignItems: "center", justifyContent: "center", padding: 60 }}>
+      <h1 style={{ color: "white", fontSize: 60, fontWeight: "bold" }}>{title}</h1>
+    </div>,
+    { width: 1200, height: 630 }
+  )
+}
+```
+
 </common_patterns>
 
 ---
@@ -669,6 +818,62 @@ if (Notification.permission === "granted") {
   // Fall back to email only
 }
 ```
+
+### Notification Fatigue Prevention
+
+Sending too many notifications causes unsubscribes and churn. Enforce frequency caps at the application layer:
+
+```typescript
+// lib/notifications/frequency-cap.ts
+import { Redis } from "@upstash/redis"
+
+const redis = Redis.fromEnv()
+
+type NotificationChannel = "email" | "push" | "sms"
+type NotificationFrequency = "daily" | "weekly"
+
+// Check if a user has received too many notifications recently
+export async function isNotificationCapped(
+  userId: string,
+  channel: NotificationChannel,
+  limit: number,
+  window: NotificationFrequency
+): Promise<boolean> {
+  const windowSeconds = window === "daily" ? 86400 : 604800
+  const key = `notif:${channel}:${userId}:${window}`
+
+  const count = await redis.incr(key)
+  if (count === 1) {
+    await redis.expire(key, windowSeconds)
+  }
+
+  return count > limit
+}
+
+// Usage before sending any notification:
+export async function sendNotificationIfAllowed(
+  userId: string,
+  notification: { subject: string; body: string; channel: "email" }
+) {
+  const isCapped = await isNotificationCapped(userId, "email", 3, "daily")  // max 3 emails/day
+
+  if (isCapped) {
+    console.log(`[notification:capped] userId=${userId} — skipping to prevent fatigue`)
+    return { sent: false, reason: "frequency_cap" }
+  }
+
+  // Send notification...
+  return { sent: true }
+}
+```
+
+**Recommended frequency caps:**
+| Channel | Max per day | Max per week | Notes |
+|---|---|---|---|
+| Email (transactional) | 3 | — | Order confirmations, password resets |
+| Email (marketing) | 1 | 3 | Welcome sequences, digests |
+| Push notification | 2 | 7 | Never push between 10pm–8am |
+| In-app notification | Uncapped | — | User controls visibility |
 
 </security_guardrails>
 

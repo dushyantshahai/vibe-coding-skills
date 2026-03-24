@@ -1,3 +1,7 @@
+---
+name: deployment-hosting
+description: Deploys apps to Vercel or Railway with preview environments and correct function timeouts. Use for first deploys, fixing build failures, setting up preview URLs per PR, or configuring AI route timeouts beyond 10 seconds.
+---
 # Skill: Deployment & Hosting
 
 ```json
@@ -435,6 +439,21 @@ Five most common causes in order of frequency:
 
 5. **Dynamic imports with server-only modules in client components** — a module that only works on the server gets imported somewhere it runs on the client. Fix: add `"use server"` directive or move the import.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Deployment
+- Platform: [Vercel | Railway] — [URL]
+- Environments: preview (PR branches), staging (main branch), production
+- AI route timeout: maxDuration=60 in vercel.json
+- Migration strategy: prisma migrate deploy in build command (additive changes safe)
+- Feature flags: [PostHog flags | database flags | not implemented]
+- Rollback: Vercel dashboard → Deployments → Promote previous
+- Smoke test: [scripts/smoke-test.ts | not implemented]
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -598,6 +617,93 @@ export function PreviewBanner() {
   );
 }
 ```
+
+### Pattern 5: Feature Flags — Gradual Rollout for AI Features
+
+Deploying a new AI feature to 100% of users at once is high-risk. Use feature flags to control rollout percentage and roll back instantly without a redeploy.
+
+Option A — PostHog feature flags (simplest, already in your stack):
+
+```typescript
+// lib/features/flags.ts
+import PostHog from "posthog-node"
+
+const posthog = new PostHog(process.env.POSTHOG_API_KEY!, {
+  host: "https://app.posthog.com"
+})
+
+export async function isFeatureEnabled(
+  flag: string,
+  userId: string,
+  userProperties?: Record<string, unknown>
+): Promise<boolean> {
+  const enabled = await posthog.isFeatureEnabled(flag, userId, {
+    personProperties: userProperties,
+  })
+  return enabled ?? false
+}
+```
+
+```typescript
+// Usage in API route or server component:
+const isNewRAGEnabled = await isFeatureEnabled("rag-v2", userId)
+
+if (isNewRAGEnabled) {
+  return generateWithRAGV2(query, userId)
+} else {
+  return generateWithRAGV1(query, userId)
+}
+```
+
+**Rollout process:**
+1. Deploy the new code behind a flag (flag defaults to 0%)
+2. Enable for internal team (100% of users with `email contains @yourcompany.com`)
+3. Roll out to 5% → 20% → 50% → 100%, monitoring error rates at each step
+4. If error rate spikes: flip flag to 0% — instant rollback, no deploy needed
+
+Option B — Simple database flag (no external dependency):
+
+```typescript
+// In your User model: featureFlags Json @default("{}")
+const user = await db.user.findUnique({ where: { id: userId } })
+const flags = user?.featureFlags as Record<string, boolean> ?? {}
+const isEnabled = flags["rag-v2"] ?? false
+```
+
+### Pattern 6: Migration Coordination — Coordinating Database Migrations with Deployments
+
+Schema migrations can break running instances if not sequenced correctly. The two failure modes:
+
+1. **New code, old schema** — code tries to use a column that doesn't exist yet (if migration runs after deploy)
+2. **Old code, new schema** — old code tries to use a column that no longer exists (if migration runs before deploy on a breaking change)
+
+**Safe sequence for additive changes (adding columns):**
+```
+1. Run migration first: prisma migrate deploy (adds new optional column)
+2. Deploy new code (now reads/writes new column safely)
+```
+
+**Safe sequence for breaking changes (renaming/removing columns):**
+```
+Use Expand-Then-Contract (see skill-database-storage):
+1. Migration: add new column (nullable)
+2. Deploy: write to both old + new column
+3. Migration: backfill data to new column
+4. Deploy: read from new column only
+5. Migration: drop old column
+```
+
+**In CI/CD pipeline (Vercel):**
+```json
+// package.json
+{
+  "scripts": {
+    "build": "prisma generate && prisma migrate deploy && next build"
+  }
+}
+```
+
+By including `prisma migrate deploy` in the build command, Vercel runs migrations before the new instance goes live. This is safe for additive changes. Use the expand-then-contract pattern for breaking changes.
 
 </common_patterns>
 

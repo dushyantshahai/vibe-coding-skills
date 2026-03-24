@@ -1,3 +1,7 @@
+---
+name: api-design-integration
+description: Connects apps to third-party services including AI providers, Stripe, email, and SMS. Use when integrating any external API, building webhook handlers, or wrapping a third-party service for reliability.
+---
 # Skill: API Design & Third-Party Integration
 
 ```json
@@ -362,6 +366,20 @@ Always use a wrapper (`/lib/openai.ts`). Here is why this matters practically:
 - When the API changes (it does), you fix it in one place
 - Your AI coding agent will generate more consistent code because every prompt can reference the same wrapper pattern
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## API Integration Patterns
+- External API wrappers: `lib/integrations/` — one file per service
+- Circuit breakers: `lib/api/circuit-breaker.ts` — openAI, stripe, etc.
+- Retry strategy: exponential backoff with jitter — `lib/api/retry.ts`
+- Pagination: cursor-based on all list endpoints
+- Webhook verification: HMAC-SHA256 signature check on all inbound webhooks
+- Idempotency: idempotency key header on all mutating external API calls
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -530,6 +548,113 @@ async function withRetry<T>(
 
 // Usage:
 const result = await withRetry(() => openai.chat.completions.create({...}));
+```
+
+### Circuit Breaker — Stop Hammering a Failing Dependency
+
+Retrying endlessly against a failing service (e.g., OpenAI during an outage) blocks threads and cascades failures across your app. A circuit breaker detects the failure and stops trying until the service recovers.
+
+```typescript
+// lib/api/circuit-breaker.ts
+type CircuitState = "closed" | "open" | "half-open"
+
+interface CircuitBreakerConfig {
+  failureThreshold: number  // how many failures before opening
+  resetTimeoutMs: number    // how long to wait before trying again
+  name: string
+}
+
+class CircuitBreaker {
+  private state: CircuitState = "closed"
+  private failureCount = 0
+  private lastFailureTime = 0
+
+  constructor(private config: CircuitBreakerConfig) {}
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === "open") {
+      const timeSinceFailure = Date.now() - this.lastFailureTime
+      if (timeSinceFailure < this.config.resetTimeoutMs) {
+        throw new Error(`Circuit breaker OPEN for ${this.config.name}. Service unavailable.`)
+      }
+      this.state = "half-open"
+    }
+
+    try {
+      const result = await fn()
+      this.onSuccess()
+      return result
+    } catch (err) {
+      this.onFailure()
+      throw err
+    }
+  }
+
+  private onSuccess() {
+    this.failureCount = 0
+    this.state = "closed"
+  }
+
+  private onFailure() {
+    this.failureCount++
+    this.lastFailureTime = Date.now()
+    if (this.failureCount >= this.config.failureThreshold) {
+      this.state = "open"
+      console.error(`[circuit-breaker:${this.config.name}] OPENED after ${this.failureCount} failures`)
+    }
+  }
+}
+
+// Usage — one breaker per external dependency
+export const openAIBreaker = new CircuitBreaker({
+  name: "openai",
+  failureThreshold: 5,
+  resetTimeoutMs: 60_000,  // try again after 60 seconds
+})
+
+export const stripeBreaker = new CircuitBreaker({
+  name: "stripe",
+  failureThreshold: 3,
+  resetTimeoutMs: 30_000,
+})
+
+// Wrap external calls:
+// const result = await openAIBreaker.execute(() => openai.chat.completions.create(...))
+```
+
+### Safe Pagination Pattern — Cursor-Based Pagination
+
+Offset pagination (`LIMIT 10 OFFSET 100`) is slow on large tables and returns inconsistent results when rows are inserted between pages. Use cursor-based pagination instead.
+
+```typescript
+// app/api/documents/route.ts
+export async function GET(req: Request) {
+  const { userId } = await requireAuth()
+  const { searchParams } = new URL(req.url)
+  const cursor = searchParams.get("cursor")  // ID of last item from previous page
+  const limit = Math.min(parseInt(searchParams.get("limit") ?? "20"), 100)  // max 100
+
+  const documents = await db.document.findMany({
+    where: { userId, deletedAt: null },
+    take: limit + 1,  // fetch one extra to determine if there's a next page
+    cursor: cursor ? { id: cursor } : undefined,
+    skip: cursor ? 1 : 0,  // skip the cursor item itself
+    orderBy: { createdAt: "desc" },
+    select: { id: true, title: true, createdAt: true },
+  })
+
+  const hasNextPage = documents.length > limit
+  const items = hasNextPage ? documents.slice(0, -1) : documents
+
+  return Response.json({
+    success: true,
+    data: {
+      items,
+      nextCursor: hasNextPage ? items[items.length - 1].id : null,
+      hasNextPage,
+    }
+  })
+}
 ```
 
 </common_patterns>

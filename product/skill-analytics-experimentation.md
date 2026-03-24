@@ -1,3 +1,7 @@
+---
+name: analytics-experimentation
+description: Instruments apps with event tracking, builds funnels, and runs A/B tests. Use before the first real users arrive, when you cannot explain why users churn, or when making product decisions that need evidence instead of opinion.
+---
 # Skill: Analytics & Experimentation
 
 ```json
@@ -428,6 +432,21 @@ Statistical significance tells you whether the difference you see between A and 
 
 **Practical rule:** Run your A/B test until each variant has at least 100 conversions (or 1,000 users) before drawing conclusions. Use a free tool like [abtestguide.com](https://abtestguide.com/calc/) to check significance. Never ship a variant based on less than 100 conversions per group.
 
+---
+
+### 🗂️ Update Your AGENT_CONTEXT.md
+
+```md
+## Analytics & Experimentation
+- Analytics tool: PostHog — typed wrapper in lib/analytics/index.ts
+- Consent: CookieBanner component — gates PostHog on user consent (GDPR compliant)
+- Event catalog: lib/analytics/events.ts — typed constants, versioned
+- AI quality metrics: regeneration_rate, edit_rate tracked as custom events
+- North Star metric: [your metric e.g. "generations per active user per week"]
+- A/B testing: PostHog feature flags — minimum 100 conversions per variant before deciding
+- Cohort retention: PostHog Retention insight + SQL in docs/analytics-queries.sql
+```
+
 </vibe_coder_bridge>
 
 ---
@@ -575,6 +594,85 @@ FROM (
 ) cohort;
 ```
 
+### Pattern 4: Event Versioning — Prevent Analytics Schema Drift
+
+When you rename an event or change its properties, historical data becomes inconsistent. Events queried today won't include data from before the rename.
+
+```typescript
+// lib/analytics/events.ts — typed event catalog with versions
+// RULE: Never rename or remove an event. Add new ones instead.
+// When changing behaviour: deprecate old event, add new event with v2 suffix
+
+export const ANALYTICS_EVENTS = {
+  // ✅ Stable events — never change property names once shipped
+  "generation_started": "generation_started",           // v1 — keep forever
+  "generation_completed": "generation_completed",        // v1
+
+  // ✅ When you need to change structure: add v2, deprecate v1
+  "generation_completed_v2": "generation_completed_v2", // v2 — added 2025-03 (added model field)
+
+  // ✅ Document deprecation in comments
+  /** @deprecated Use generation_completed_v2 — stop firing after 2025-06-01 */
+  // "generation_completed": ...  ← already declared above, don't fire in new code
+} as const
+
+// lib/analytics/index.ts — add event version to every call for traceability
+export const analytics = {
+  track: (event: string, properties: Record<string, unknown>) => {
+    posthog.capture(event, {
+      ...properties,
+      $event_schema_version: 1,  // increment when properties change
+      $client_timestamp: new Date().toISOString(),
+    })
+  }
+}
+```
+
+**Event registry pattern:** Keep a `docs/analytics-events.md` file that lists every event, its properties, when it was added, and when it was deprecated. This is your analytics schema changelog.
+
+### Pattern 5: Cohort Analysis — Understanding Which Users Retain
+
+Conversion rates in isolation are misleading. A 40% day-7 retention rate means nothing without knowing if it's improving or declining across cohorts.
+
+```sql
+-- Day-7 retention cohort query (run in PostHog SQL or your data warehouse)
+-- Groups users by signup week and measures what % came back 7 days later
+
+WITH cohorts AS (
+  SELECT
+    user_id,
+    DATE_TRUNC('week', MIN(timestamp)) as cohort_week,
+    MIN(timestamp) as first_seen
+  FROM events
+  WHERE event = 'user_signed_up'
+  GROUP BY user_id
+),
+retention AS (
+  SELECT
+    c.user_id,
+    c.cohort_week,
+    DATE_TRUNC('week', e.timestamp) as activity_week,
+    DATE_DIFF('week', c.cohort_week, DATE_TRUNC('week', e.timestamp)) as weeks_since_signup
+  FROM cohorts c
+  JOIN events e ON c.user_id = e.user_id
+  WHERE e.event = 'generation_completed'  -- your activation/core value event
+)
+SELECT
+  cohort_week,
+  COUNT(DISTINCT CASE WHEN weeks_since_signup = 0 THEN user_id END) as week_0_users,
+  COUNT(DISTINCT CASE WHEN weeks_since_signup = 1 THEN user_id END) as week_1_retained,
+  ROUND(
+    100.0 * COUNT(DISTINCT CASE WHEN weeks_since_signup = 1 THEN user_id END) /
+    NULLIF(COUNT(DISTINCT CASE WHEN weeks_since_signup = 0 THEN user_id END), 0),
+    1
+  ) as week_1_retention_pct
+FROM retention
+GROUP BY cohort_week
+ORDER BY cohort_week DESC;
+```
+
+In PostHog, use the **Retention** insight type and group by signup date. A healthy retention curve "flattens" (rather than dropping to zero) — the flat portion represents your retained power users.
+
 </common_patterns>
 
 ---
@@ -611,6 +709,74 @@ export function initAnalytics() {
 
 ### Rule 3: Disclose Analytics in Your Privacy Policy
 Any user data collected for analytics must be disclosed in your privacy policy. At minimum, your policy should state that you collect usage events, what they contain, and how long you retain them.
+
+### GDPR Consent — Gate Analytics on User Consent
+
+In EU, UK, and California, you must obtain consent before firing analytics events. Initialising PostHog before consent is a GDPR violation that can result in fines.
+
+```typescript
+// lib/analytics/consent.ts
+export function initAnalyticsWithConsent(userId?: string) {
+  // Check if consent was previously given (stored in localStorage)
+  const hasConsent = localStorage.getItem("analytics_consent") === "granted"
+
+  if (hasConsent) {
+    posthog.opt_in_capturing()
+    if (userId) posthog.identify(userId)
+  } else {
+    posthog.opt_out_capturing()  // ensure not capturing until consent
+  }
+}
+
+export function grantAnalyticsConsent(userId?: string) {
+  localStorage.setItem("analytics_consent", "granted")
+  posthog.opt_in_capturing()
+  if (userId) posthog.identify(userId)
+}
+
+export function revokeAnalyticsConsent() {
+  localStorage.setItem("analytics_consent", "denied")
+  posthog.opt_out_capturing()
+  posthog.reset()  // clear any stored user identity
+}
+```
+
+```tsx
+// components/features/consent/cookie-banner.tsx
+// Show on first visit — gate on "analytics_consent" not being set
+export function CookieBanner() {
+  const [show, setShow] = useState(
+    typeof window !== "undefined" && !localStorage.getItem("analytics_consent")
+  )
+
+  if (!show) return null
+
+  return (
+    <div role="dialog" aria-label="Cookie consent" className="fixed bottom-4 left-4 right-4 md:left-auto md:max-w-sm bg-white dark:bg-gray-800 border rounded-lg p-4 shadow-lg z-50">
+      <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
+        We use analytics to improve your experience. No personal data is sold.{" "}
+        <a href="/privacy" className="underline">Privacy policy</a>
+      </p>
+      <div className="flex gap-2">
+        <button onClick={() => { grantAnalyticsConsent(); setShow(false) }} className="btn-primary text-sm">
+          Accept
+        </button>
+        <button onClick={() => { revokeAnalyticsConsent(); setShow(false) }} className="btn-secondary text-sm">
+          Decline
+        </button>
+      </div>
+    </div>
+  )
+}
+```
+
+**Minimum requirements by region:**
+| Region | Requirement |
+|---|---|
+| EU/EEA | Explicit opt-in before any analytics (GDPR) |
+| UK | Same as GDPR (UK GDPR) |
+| California | Opt-out mechanism must be visible (CCPA) |
+| Rest of world | No legal requirement, but best practice |
 
 </security_guardrails>
 
